@@ -3,6 +3,12 @@
   "displayName": "Groq Code Assistant",
   "description": "AI-powered code completion and generation using Groq",
   "version": "1.0.0",
+  "publisher": "SujayBabuThota",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sujay149/Prompt2Code.git"
+  },
+  "icon": "Prompt2Code.png",
   "engines": {
     "vscode": "^1.85.0"
   },
