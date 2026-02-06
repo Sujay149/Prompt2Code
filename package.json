@@ -1,0 +1,138 @@
+{
+  "name": "groq-code-assistant",
+  "displayName": "Groq Code Assistant",
+  "description": "AI-powered code completion and generation using Groq",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Snippets"
+  ],
+  "activationEvents": [
+    "onLanguage:html",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescriptreact",
+    "onLanguage:css"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "groq-chat",
+          "title": "Groq AI Assistant",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "groq-chat": [
+        {
+          "type": "webview",
+          "id": "groq.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "groq.generateCode",
+        "title": "Groq: Generate Code from Instruction"
+      },
+      {
+        "command": "groq.enableInline",
+        "title": "Groq: Enable Inline Suggestions"
+      },
+      {
+        "command": "groq.disableInline",
+        "title": "Groq: Disable Inline Suggestions"
+      },
+      {
+        "command": "groq.openChat",
+        "title": "Groq: Open Chat",
+        "icon": "$(comment-discussion)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "groq.generateCode",
+        "key": "ctrl+shift+g",
+        "mac": "cmd+shift+g",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Groq Code Assistant",
+      "properties": {
+        "groq.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your Groq API key",
+          "order": 1
+        },
+        "groq.model": {
+          "type": "string",
+          "default": "llama-3.3-70b-versatile",
+          "enum": [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "llama3-groq-70b-8192-tool-use-preview",
+            "llama3-groq-8b-8192-tool-use-preview"
+          ],
+          "description": "Groq model to use",
+          "order": 2
+        },
+        "groq.maxTokens": {
+          "type": "number",
+          "default": 2048,
+          "description": "Maximum tokens in response",
+          "order": 3
+        },
+        "groq.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature (0 = deterministic, 2 = creative)",
+          "order": 4
+        },
+        "groq.enableInlineCompletions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline code completions",
+          "order": 5
+        },
+        "groq.debounceMs": {
+          "type": "number",
+          "default": 300,
+          "description": "Debounce delay for inline completions (ms)",
+          "order": 6
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.x",
+    "@typescript-eslint/parser": "^6.x",
+    "eslint": "^8.x",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}
