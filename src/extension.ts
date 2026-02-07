@@ -10,7 +10,7 @@ let promptBuilder: PromptBuilder;
 let inlineCompletionsEnabled = true;
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log('Groq Code Assistant is now active');
+  console.log('Prompt2Code is now active');
 
   // Initialize services
   groqClient = new GroqClient();
@@ -33,13 +33,13 @@ export function activate(context: vscode.ExtensionContext) {
   registerInlineCompletionProvider(context);
 
   // Load initial settings
-  const config = vscode.workspace.getConfiguration('groq');
+  const config = vscode.workspace.getConfiguration('prompt2code');
   inlineCompletionsEnabled = config.get<boolean>('enableInlineCompletions', true);
 }
 
 function registerCommands(context: vscode.ExtensionContext) {
   // Command: Generate code from instruction
-  const generateCodeCommand = vscode.commands.registerCommand('groq.generateCode', async () => {
+  const generateCodeCommand = vscode.commands.registerCommand('prompt2code.generateCode', async () => {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
       return;
@@ -106,22 +106,22 @@ function registerCommands(context: vscode.ExtensionContext) {
   });
 
   // Command: Enable inline completions
-  const enableInlineCommand = vscode.commands.registerCommand('groq.enableInline', () => {
+  const enableInlineCommand = vscode.commands.registerCommand('prompt2code.enableInline', () => {
     inlineCompletionsEnabled = true;
-    vscode.workspace.getConfiguration('groq').update('enableInlineCompletions', true, true);
-    vscode.window.showInformationMessage('Groq inline completions enabled');
+    vscode.workspace.getConfiguration('prompt2code').update('enableInlineCompletions', true, true);
+    vscode.window.showInformationMessage('Prompt2Code inline suggestions enabled');
   });
 
   // Command: Disable inline completions
-  const disableInlineCommand = vscode.commands.registerCommand('groq.disableInline', () => {
+  const disableInlineCommand = vscode.commands.registerCommand('prompt2code.disableInline', () => {
     inlineCompletionsEnabled = false;
-    vscode.workspace.getConfiguration('groq').update('enableInlineCompletions', false, true);
-    vscode.window.showInformationMessage('Groq inline completions disabled');
+    vscode.workspace.getConfiguration('prompt2code').update('enableInlineCompletions', false, true);
+    vscode.window.showInformationMessage('Prompt2Code inline suggestions disabled');
   });
 
   // Command: Open chat view
-  const openChatCommand = vscode.commands.registerCommand('groq.openChat', () => {
-    vscode.commands.executeCommand('groq.chatView.focus');
+  const openChatCommand = vscode.commands.registerCommand('prompt2code.openChat', () => {
+    vscode.commands.executeCommand('prompt2code.chatView.focus');
   });
 
   context.subscriptions.push(generateCodeCommand, enableInlineCommand, disableInlineCommand, openChatCommand);
@@ -153,7 +153,7 @@ function registerInlineCompletionProvider(context: vscode.ExtensionContext) {
       }
 
       // Check if we should provide completion
-      const config = vscode.workspace.getConfiguration('groq');
+      const config = vscode.workspace.getConfiguration('prompt2code');
       if (!config.get<boolean>('enableInlineCompletions', true)) {
         return null;
       }
@@ -245,17 +245,17 @@ vscode.workspace.onDidChangeTextDocument(async (event) => {
 
   if (htmlCommentComplete || singleLineComplete || multiLineComplete) {
     // Check if the user wants auto-generation (you could add a setting for this)
-    const autoGenerate = vscode.workspace.getConfiguration('groq').get<boolean>('autoGenerateOnComment', false);
+    const autoGenerate = vscode.workspace.getConfiguration('prompt2code').get<boolean>('autoGenerateOnComment', false);
     
     if (autoGenerate) {
       // Small delay to ensure the comment is fully typed
       setTimeout(async () => {
-        await vscode.commands.executeCommand('groq.generateCode');
+        await vscode.commands.executeCommand('prompt2code.generateCode');
       }, 500);
     }
   }
 });
 
 export function deactivate() {
-  console.log('Groq Code Assistant deactivated');
+  console.log('Prompt2Code deactivated');
 }

@@ -1,8 +1,8 @@
 {
   "name": "prompt2code",
   "displayName": "Prompt2Code",
-  "description": "Prompt-driven code generation and inline completions inside VS Code (powered by Groq)",
-  "version": "1.0.1",
+  "description": "Prompt-driven code generation and inline completions powered by Groq",
+  "version": "1.0.0",
   "publisher": "SujayBabuThota",
   "repository": {
     "type": "git",
@@ -30,43 +30,43 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "prompt2code-chat",
+          "id": "groq-chat",
           "title": "Prompt2Code",
           "icon": "$(comment-discussion)"
         }
       ]
     },
     "views": {
-      "prompt2code-chat": [
+      "groq-chat": [
         {
           "type": "webview",
-          "id": "prompt2code.chatView",
+          "id": "groq.chatView",
           "name": "Chat"
         }
       ]
     },
     "commands": [
       {
-        "command": "prompt2code.generateCode",
-        "title": "Prompt2Code: Generate Code"
+        "command": "groq.generateCode",
+        "title": "Groq: Generate Code from Instruction"
       },
       {
-        "command": "prompt2code.enableInline",
-        "title": "Prompt2Code: Enable Inline Suggestions"
+        "command": "groq.enableInline",
+        "title": "Groq: Enable Inline Suggestions"
       },
       {
-        "command": "prompt2code.disableInline",
-        "title": "Prompt2Code: Disable Inline Suggestions"
+        "command": "groq.disableInline",
+        "title": "Groq: Disable Inline Suggestions"
       },
       {
-        "command": "prompt2code.openChat",
-        "title": "Prompt2Code: Open Chat",
+        "command": "groq.openChat",
+        "title": "Groq: Open Chat",
         "icon": "$(comment-discussion)"
       }
     ],
     "keybindings": [
       {
-        "command": "prompt2code.generateCode",
+        "command": "groq.generateCode",
         "key": "ctrl+shift+g",
         "mac": "cmd+shift+g",
         "when": "editorTextFocus"
@@ -75,13 +75,13 @@
     "configuration": {
       "title": "Prompt2Code",
       "properties": {
-        "prompt2code.apiKey": {
+        "groq.apiKey": {
           "type": "string",
           "default": "",
           "description": "Your Groq API key",
           "order": 1
         },
-        "prompt2code.model": {
+        "groq.model": {
           "type": "string",
           "default": "llama-3.3-70b-versatile",
           "enum": [
@@ -94,13 +94,13 @@
           "description": "Groq model to use",
           "order": 2
         },
-        "prompt2code.maxTokens": {
+        "groq.maxTokens": {
           "type": "number",
           "default": 2048,
           "description": "Maximum tokens in response",
           "order": 3
         },
-        "prompt2code.temperature": {
+        "groq.temperature": {
           "type": "number",
           "default": 0.2,
           "minimum": 0,
@@ -108,13 +108,13 @@
           "description": "Sampling temperature (0 = deterministic, 2 = creative)",
           "order": 4
         },
-        "prompt2code.enableInlineCompletions": {
+        "groq.enableInlineCompletions": {
           "type": "boolean",
           "default": true,
           "description": "Enable inline code completions",
           "order": 5
         },
-        "prompt2code.debounceMs": {
+        "groq.debounceMs": {
           "type": "number",
           "default": 300,
           "description": "Debounce delay for inline completions (ms)",

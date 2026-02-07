@@ -3,7 +3,7 @@ import * as path from 'path';
 import { GroqClient, GroqMessage } from './groqClient';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'groq.chatView';
+  public static readonly viewType = 'prompt2code.chatView';
 
   private _view?: vscode.WebviewView;
   private groqClient: GroqClient;
@@ -90,11 +90,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       // ⚠️ CHECK API KEY FIRST
-      const apiKey = vscode.workspace.getConfiguration('groq').get<string>('apiKey', '');
+      const apiKey = vscode.workspace.getConfiguration('prompt2code').get<string>('apiKey', '');
       console.log('🔑 API Key configured:', apiKey ? 'YES' : 'NO');
 
       if (!apiKey || apiKey.trim() === '') {
-        throw new Error('⚠️ Groq API key not configured. Please set it in Settings → Groq: Api Key\n\nGet your free API key at: https://console.groq.com');
+        throw new Error('⚠️ Groq API key not configured. Please set it in Settings → Prompt2Code: Api Key\n\nGet your free API key at: https://console.groq.com');
       }
 
       const editor = this.getTargetEditor();

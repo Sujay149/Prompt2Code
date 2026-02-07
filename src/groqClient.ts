@@ -40,7 +40,7 @@ export class GroqClient {
   }
 
   private getConfig() {
-    const config = vscode.workspace.getConfiguration('groq');
+    const config = vscode.workspace.getConfiguration('prompt2code');
     return {
       apiKey: config.get<string>('apiKey', ''),
       // Keep this aligned with package.json default.
@@ -58,7 +58,7 @@ export class GroqClient {
 
     if (!config.apiKey) {
       vscode.window.showErrorMessage(
-        'Groq API key not set. Configure groq.apiKey in settings.'
+        'Groq API key not set. Configure prompt2code.apiKey in settings.'
       );
       throw new Error('Missing Groq API key');
     }
