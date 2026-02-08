@@ -1,13 +1,16 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { GroqClient } from './groqClient';
 import { InstructionDetector, InstructionMatch } from './instructionDetector';
 import { PromptBuilder } from './promptBuilder';
 import { ChatViewProvider } from './chatViewProvider';
+import { createWorkspaceFile, buildProjectTree, gatherProjectContext } from './workspaceHelper';
 
 let groqClient: GroqClient;
 let instructionDetector: InstructionDetector;
 let promptBuilder: PromptBuilder;
 let inlineCompletionsEnabled = true;
+let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Prompt2Code is now active');
@@ -16,6 +19,11 @@ export function activate(context: vscode.ExtensionContext) {
   groqClient = new GroqClient();
   instructionDetector = new InstructionDetector();
   promptBuilder = new PromptBuilder();
+
+  // Status bar item for generation progress
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBarItem.text = '$(loading~spin) Prompt2Code: Working…';
+  context.subscriptions.push(statusBarItem);
 
   // Register chat view provider
   const chatViewProvider = new ChatViewProvider(context.extensionUri);
@@ -67,36 +75,98 @@ function registerCommands(context: vscode.ExtensionContext) {
         return;
       }
 
-      // Show progress
+      // Show progress with streaming
+      statusBarItem.show();
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'Generating code...',
+          title: '$(loading~spin) Prompt2Code: Generating code…',
           cancellable: false
         },
-        async () => {
+        async (progress) => {
           try {
-            // Get surrounding context
-            const context = promptBuilder.buildContext(document, position);
+            // Get surrounding context + auto-scanned project files
+            const localCtx = promptBuilder.buildContext(document, position);
 
-            // Generate code
-            const generatedCode = await groqClient.generateCode(
+            const projectCtx = await gatherProjectContext({
+              languageId: document.languageId,
+              currentFilePath: document.uri.fsPath,
+              maxChars: Math.min(groqClient.getContextCharBudget(), 30_000),
+              maxFiles: 8,
+            });
+
+            const ctx = projectCtx.text
+              ? `${localCtx}\n\n${projectCtx.text}`
+              : localCtx;
+
+            // Replace the instruction range with a placeholder first
+            await editor.edit(editBuilder => {
+              editBuilder.replace(instructionMatch!.range, '<!-- ⏳ Generating code… -->\n');
+            });
+
+            // Serialised editor updates — only one edit in-flight at a time
+            let pendingText: string | null = null;
+            let lastLength = 0;
+            let editBusy = false;
+
+            const applyPending = async () => {
+              if (editBusy || pendingText === null) { return; }
+              editBusy = true;
+              const text = pendingText;
+              pendingText = null;
+              try {
+                const r = new vscode.Range(
+                  document.positionAt(0),
+                  document.positionAt(document.getText().length)
+                );
+                await editor.edit(eb => {
+                  eb.replace(r, text);
+                }, { undoStopBefore: false, undoStopAfter: false });
+              } catch { /* editor busy, retry next round */ }
+              editBusy = false;
+              if (pendingText !== null) { applyPending(); }
+            };
+
+            // Stream code directly into the editor
+            const generatedCode = await groqClient.generateCodeStreaming(
               instructionMatch!.instruction,
               instructionMatch!.language,
-              context
+              (accumulated) => {
+                if (accumulated.length - lastLength < 200) { return; }
+                lastLength = accumulated.length;
+                progress.report({ message: `${accumulated.length} chars received…` });
+                pendingText = accumulated;
+                applyPending();
+              },
+              ctx
             );
 
-            // Replace the instruction with generated code
-            await editor.edit(editBuilder => {
-              editBuilder.replace(instructionMatch!.range, generatedCode);
-            });
+            // Wait for any in-flight edit before final write
+            while (editBusy) { await new Promise(r => setTimeout(r, 80)); }
+
+            // Final write — retry up to 3 times
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const r = new vscode.Range(
+                document.positionAt(0),
+                document.positionAt(document.getText().length)
+              );
+              const ok = await editor.edit(eb => {
+                eb.replace(r, generatedCode);
+              });
+              if (ok) { break; }
+              await new Promise(r => setTimeout(r, 120));
+            }
 
             // Format the document
             await vscode.commands.executeCommand('editor.action.formatDocument');
 
+            vscode.window.showInformationMessage('Prompt2Code: Code generated ✅');
+
           } catch (error) {
             console.error('Error generating code:', error);
             vscode.window.showErrorMessage('Failed to generate code. Please check your API key and try again.');
+          } finally {
+            statusBarItem.hide();
           }
         }
       );
@@ -124,7 +194,51 @@ function registerCommands(context: vscode.ExtensionContext) {
     vscode.commands.executeCommand('prompt2code.chatView.focus');
   });
 
-  context.subscriptions.push(generateCodeCommand, enableInlineCommand, disableInlineCommand, openChatCommand);
+  // Command: Create a new file with AI-generated content
+  const createFileCommand = vscode.commands.registerCommand('prompt2code.createFile', async () => {
+    const fileName = await vscode.window.showInputBox({
+      prompt: 'File path (relative to workspace root)',
+      placeHolder: 'e.g. src/components/Button.tsx',
+    });
+    if (!fileName) { return; }
+
+    const instruction = await vscode.window.showInputBox({
+      prompt: 'Describe what this file should contain',
+      placeHolder: 'e.g. a reusable button component with primary/secondary variants',
+    });
+    if (!instruction) { return; }
+
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Creating ${fileName}...`, cancellable: false },
+      async () => {
+        try {
+          const ext = path.extname(fileName).slice(1) || 'txt';
+          const langMap: Record<string, string> = {
+            ts: 'typescript', tsx: 'typescriptreact', js: 'javascript', jsx: 'javascriptreact',
+            html: 'html', css: 'css', scss: 'scss', py: 'python', java: 'java',
+            json: 'json', md: 'markdown', sql: 'sql', go: 'go', rs: 'rust',
+          };
+          const language = langMap[ext] || ext;
+
+          // Gather project context so AI can match existing code patterns
+          const projectCtx = await gatherProjectContext({
+            languageId: language,
+            maxChars: Math.min(groqClient.getContextCharBudget(), 30_000),
+            maxFiles: 8,
+          });
+          const context = projectCtx.text || `Project files:\n${await buildProjectTree()}`;
+
+          const code = await groqClient.generateCode(instruction, language, context);
+          await createWorkspaceFile(fileName, code);
+          vscode.window.showInformationMessage(`Created ${fileName}`);
+        } catch (err: any) {
+          vscode.window.showErrorMessage(`Failed to create file: ${err.message}`);
+        }
+      }
+    );
+  });
+
+  context.subscriptions.push(generateCodeCommand, enableInlineCommand, disableInlineCommand, openChatCommand, createFileCommand);
 }
 
 function registerInlineCompletionProvider(context: vscode.ExtensionContext) {

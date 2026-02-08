@@ -1,6 +1,16 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { GroqClient, GroqMessage } from './groqClient';
+import {
+  listWorkspaceFiles,
+  readWorkspaceFile,
+  createWorkspaceFile,
+  buildProjectTree,
+  readFilesAsContext,
+  extractFileReferences,
+  stripFileReferences,
+  gatherProjectContext,
+} from './workspaceHelper';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'prompt2code.chatView';
@@ -10,6 +20,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private conversationHistory: GroqMessage[] = [];
   private lastTextEditor?: vscode.TextEditor;
   private disposables: vscode.Disposable[] = [];
+
+  /** Checkpoint store: id → { uri, content } for undo/restore. */
+  private checkpoints = new Map<string, { uri: vscode.Uri; content: string }>();
+  private checkpointCounter = 0;
 
   constructor(private readonly _extensionUri: vscode.Uri) {
     this.groqClient = new GroqClient();
@@ -23,9 +37,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Track the last active text editor so code-intent works even
     // when focus is inside the chat webview.
     this.lastTextEditor = vscode.window.activeTextEditor;
+    this.sendActiveFileToWebview(this.lastTextEditor);
     this.disposables.push(
       vscode.window.onDidChangeActiveTextEditor((editor) => {
-        if (editor) this.lastTextEditor = editor;
+        if (editor) {
+          this.lastTextEditor = editor;
+          this.sendActiveFileToWebview(editor);
+        }
       })
     );
     webviewView.onDidDispose(() => {
@@ -45,7 +63,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       switch (data.type) {
         case 'sendMessage':
-          await this.handleUserMessage(data.message);
+          await this.handleUserMessage(data.message, data.attachedFiles || []);
           break;
 
         case 'clearChat':
@@ -60,7 +78,69 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await vscode.env.clipboard.writeText(data.code);
           vscode.window.showInformationMessage('Code copied to clipboard');
           break;
+
+        case 'pickFile':
+          await this.handlePickFile();
+          break;
+
+        case 'removeTrackedFile':
+          // User removed the tracked file chip — nothing to do server-side
+          break;
+
+        case 'trimHistory': {
+          // User clicked "Edit" on a message — trim conversation from that point
+          const idx = this.conversationHistory.findIndex(
+            m => m.role === 'user' && m.content === data.content
+          );
+          if (idx >= 0) {
+            this.conversationHistory = this.conversationHistory.slice(0, idx);
+          }
+          break;
+        }
+
+        case 'checkpointAction': {
+          const cp = this.checkpoints.get(data.id);
+          if (!cp) { break; }
+          if (data.action === 'discard') {
+            // Restore file to checkpoint content
+            try {
+              const doc = await vscode.workspace.openTextDocument(cp.uri);
+              const editor = await vscode.window.showTextDocument(doc);
+              const fullRange = new vscode.Range(
+                doc.positionAt(0),
+                doc.positionAt(doc.getText().length)
+              );
+              await editor.edit(eb => { eb.replace(fullRange, cp.content); });
+              vscode.window.showInformationMessage('Restored to checkpoint');
+            } catch {
+              vscode.window.showErrorMessage('Failed to restore checkpoint');
+            }
+          }
+          // Either way, clean up the checkpoint
+          this.checkpoints.delete(data.id);
+          break;
+        }
       }
+    });
+  }
+
+  /** Send the currently active file info to the webview so it can show a chip. */
+  private sendActiveFileToWebview(editor?: vscode.TextEditor) {
+    if (!this._view) { return; }
+    if (!editor) {
+      this._view.webview.postMessage({ type: 'activeFile', fileName: null, relPath: null, languageId: null });
+      return;
+    }
+    const doc = editor.document;
+    const ws = vscode.workspace.getWorkspaceFolder(doc.uri);
+    const relPath = ws
+      ? path.relative(ws.uri.fsPath, doc.uri.fsPath).replace(/\\/g, '/')
+      : path.basename(doc.uri.fsPath);
+    this._view.webview.postMessage({
+      type: 'activeFile',
+      fileName: path.basename(doc.uri.fsPath),
+      relPath,
+      languageId: doc.languageId,
     });
   }
 
@@ -68,10 +148,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // MESSAGE HANDLING
   // ===========================
 
-  private async handleUserMessage(message: string) {
+  private async handleUserMessage(message: string, attachedFiles: string[] = []) {
     if (!message || !message.trim()) return;
 
-    console.log('📨 Handling message:', message);
+    console.log('📨 Handling message:', message, 'attached:', attachedFiles);
 
     // 1️⃣ Show user message immediately
     this._view?.webview.postMessage({
@@ -97,11 +177,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         throw new Error('⚠️ Groq API key not configured. Please set it in Settings → Prompt2Code: Api Key\n\nGet your free API key at: https://console.groq.com');
       }
 
+      // ── Resolve @file / #file: references ──
+      const fileRefs = extractFileReferences(message);
+      const cleanMessage = stripFileReferences(message);
+
+      // Merge explicitly attached files (from the chip) with @file refs
+      const allFileRefs = [...new Set([...fileRefs, ...attachedFiles])];
+
+      let referencedFilesContext = '';
+      if (allFileRefs.length > 0) {
+        referencedFilesContext = await readFilesAsContext(allFileRefs);
+      }
+
+      // ── Detect "create file" intent ──
+      const createFileMatch = this.detectCreateFileIntent(cleanMessage);
+
+      if (createFileMatch) {
+        await this.handleCreateFile(cleanMessage, createFileMatch, referencedFilesContext);
+        return;
+      }
+
+      // ── Detect code-edit intent (existing behaviour) ──
       const editor = this.getTargetEditor();
       const doc = editor?.document;
       const languageId = doc?.languageId ?? 'plaintext';
-
-      const isCodeIntent = this.isCodeEditIntent(message);
+      const isCodeIntent = this.isCodeEditIntent(cleanMessage)
+        || (attachedFiles.length > 0 && !/\b(explain|what|why|how|describe|tell|show|list|help|question|ask)\b/i.test(cleanMessage));
 
       if (isCodeIntent) {
         if (!editor || !doc) {
@@ -115,15 +216,52 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         console.log('🚀 Calling Groq API (code generation mode)...');
 
-        const target = this.determineTargetLanguage(doc.languageId, message);
-        const context = await this.buildCodebaseContext(doc, { targetLanguageId: target.languageId, instruction: message });
-        const newCode = await this.groqClient.generateCode(
-          message,
+        const target = this.determineTargetLanguage(doc.languageId, cleanMessage);
+
+        // Build context: current file + referenced files + auto-scanned project files
+        const contextParts: string[] = [];
+        if (referencedFilesContext) { contextParts.push(referencedFilesContext); }
+        const baseCtx = await this.buildCodebaseContext(doc, { targetLanguageId: target.languageId, instruction: cleanMessage }, true);
+        contextParts.push(baseCtx);
+
+        // Auto-scan: gather same-language project files, configs, open tabs
+        // Budget is driven by the model's token window
+        const ctxCharBudget = this.groqClient.getContextCharBudget();
+        const projectCtx = await gatherProjectContext({
+          languageId: target.languageId || doc.languageId,
+          currentFilePath: doc.uri.fsPath,
+          maxChars: Math.min(ctxCharBudget, 40_000),
+          maxFiles: 8,
+        });
+        if (projectCtx.text) { contextParts.push(projectCtx.text); }
+
+        // Show "working" status in chat
+        this._view?.webview.postMessage({
+          type: 'assistantMessage',
+          message: '⏳ Generating code — watch the editor for live changes…'
+        });
+
+        // 💾 Save checkpoint before modifying the editor
+        const cpId = String(++this.checkpointCounter);
+        this.checkpoints.set(cpId, { uri: doc.uri, content: doc.getText() });
+
+        // Capture the current file content for UPDATE mode —
+        // the AI will modify this rather than regenerating from scratch.
+        const currentFileContent = doc.getText();
+
+        // Stream code directly into the editor
+        const updater = this.makeStreamUpdater(editor, 200);
+        const newCode = await this.groqClient.generateCodeStreaming(
+          cleanMessage,
           target.promptLanguage,
-          context
+          updater.onChunk,
+          contextParts.join('\n\n'),
+          currentFileContent // ← tells the AI to UPDATE, not regenerate
         );
 
-        await this.replaceFullDocument(editor, newCode);
+        // Wait for any in-flight edit, then do the final write
+        await updater.flush();
+        await this.replaceFullDocument(editor, newCode, 5);
 
         // If user asked for React while editing HTML, switch language mode for better UX.
         if (target.languageId && target.languageId !== doc.languageId) {
@@ -135,20 +273,43 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         vscode.window.showInformationMessage('Code updated in editor');
 
-        // Copilot-like feedback without showing generated code.
         this._view?.webview.postMessage({
           type: 'assistantMessage',
-          message: 'Code updated in editor.'
+          message: '✅ Code updated in editor.'
         });
 
-        // Chat is for explanations only; do NOT render generated code in chat.
+        // Show Keep / Undo checkpoint banner
+        this._view?.webview.postMessage({ type: 'checkpoint', id: cpId });
+
         return;
       }
 
-      // Chat / explanation mode
+      // ── Chat / explanation mode ──
       let contextInfo = '';
       if (doc) {
         contextInfo = `\n\nCurrent file: ${doc.fileName} (${languageId})`;
+      }
+      if (referencedFilesContext) {
+        contextInfo += `\n\nReferenced files:\n${referencedFilesContext}`;
+      }
+
+      // If user typed @workspace or the message asks about the project structure,
+      // attach a compact project tree.
+      if (/(@workspace|project structure|codebase|all files)/i.test(message)) {
+        const tree = await buildProjectTree();
+        contextInfo += `\n\nProject files:\n${tree}`;
+      }
+
+      // Always include some project context so the AI understands the codebase
+      const chatCharBudget = this.groqClient.getContextCharBudget();
+      const projCtx = await gatherProjectContext({
+        languageId: doc?.languageId,
+        currentFilePath: doc?.uri.fsPath,
+        maxChars: Math.min(chatCharBudget, 15_000),
+        maxFiles: 5,
+      });
+      if (projCtx.text) {
+        contextInfo += `\n\nProject context (${projCtx.fileCount} files):\n${projCtx.text}`;
       }
 
       const messages: GroqMessage[] = [
@@ -158,7 +319,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             'You are a helpful coding assistant. Explain clearly. Use minimal markdown. Avoid fenced code blocks.'
         },
         ...this.conversationHistory.slice(0, -1),
-        { role: 'user', content: message + contextInfo }
+        { role: 'user', content: cleanMessage + contextInfo }
       ];
 
       console.log('🚀 Calling Groq API (chat mode)...');
@@ -187,6 +348,104 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // ===========================
+  // CREATE FILE FROM CHAT
+  // ===========================
+
+  /**
+   * Detect if the user wants to create a new file.
+   * Returns the desired filename / relative path, or null.
+   */
+  private detectCreateFileIntent(msg: string): string | null {
+    // "create file src/utils/helpers.ts" / "create a new file called App.jsx"
+    const patterns = [
+      /\bcreate\s+(?:a\s+)?(?:new\s+)?file\s+(?:called\s+|named\s+)?([^\s,]+\.\w+)/i,
+      /\bnew\s+file\s+(?:called\s+|named\s+)?([^\s,]+\.\w+)/i,
+      /\bgenerate\s+(?:a\s+)?(?:new\s+)?file\s+(?:called\s+|named\s+)?([^\s,]+\.\w+)/i,
+      /\bmake\s+(?:a\s+)?(?:new\s+)?file\s+(?:called\s+|named\s+)?([^\s,]+\.\w+)/i,
+      /\badd\s+(?:a\s+)?(?:new\s+)?file\s+(?:called\s+|named\s+)?([^\s,]+\.\w+)/i,
+    ];
+    for (const re of patterns) {
+      const m = re.exec(msg);
+      if (m) { return m[1]; }
+    }
+    return null;
+  }
+
+  /**
+   * Ask the AI to generate file content, then create + open the file in the editor.
+   */
+  private async handleCreateFile(
+    instruction: string,
+    relPath: string,
+    referencedFilesContext: string
+  ): Promise<void> {
+    const ext = path.extname(relPath).slice(1) || 'txt';
+    const langMap: Record<string, string> = {
+      ts: 'typescript', tsx: 'typescriptreact', js: 'javascript', jsx: 'javascriptreact',
+      html: 'html', css: 'css', scss: 'scss', py: 'python', java: 'java',
+      json: 'json', md: 'markdown', sql: 'sql', go: 'go', rs: 'rust',
+    };
+    const language = langMap[ext] || ext;
+
+    // Build context: referenced files + auto-scanned project codebase
+    const contextParts: string[] = [];
+    if (referencedFilesContext) { contextParts.push(referencedFilesContext); }
+
+    // Auto-scan: configs + same-language files + open tabs
+    const createCharBudget = this.groqClient.getContextCharBudget();
+    const projectCtx = await gatherProjectContext({
+      languageId: language,
+      maxChars: Math.min(createCharBudget, 30_000),
+      maxFiles: 8,
+    });
+    if (projectCtx.text) { contextParts.push(projectCtx.text); }
+
+    console.log(`🚀 Generating new file: ${relPath}`);
+
+    // Create an empty file first so user sees the editor open immediately
+    const editor = await createWorkspaceFile(relPath, `// Generating ${relPath}...\n`);
+
+    if (!editor) {
+      this._view?.webview.postMessage({
+        type: 'error',
+        message: `Failed to create ${relPath}.`
+      });
+      return;
+    }
+
+    this._view?.webview.postMessage({
+      type: 'assistantMessage',
+      message: `⏳ Creating **${relPath}** — watch the editor for live output…`
+    });
+
+    // 💾 Save checkpoint (empty file state) before streaming
+    const cpId = String(++this.checkpointCounter);
+    this.checkpoints.set(cpId, { uri: editor.document.uri, content: editor.document.getText() });
+
+    // Stream into the newly created file
+    const updater = this.makeStreamUpdater(editor, 200);
+    const code = await this.groqClient.generateCodeStreaming(
+      instruction,
+      language,
+      updater.onChunk,
+      contextParts.join('\n\n')
+    );
+
+    // Wait for any in-flight edit, then do the final write
+    await updater.flush();
+    await this.replaceFullDocument(editor, code, 5);
+
+    vscode.window.showInformationMessage(`Created ${relPath}`);
+    this._view?.webview.postMessage({
+      type: 'assistantMessage',
+      message: `✅ Created and opened **${relPath}** in the editor.`
+    });
+
+    // Show Keep / Undo checkpoint banner
+    this._view?.webview.postMessage({ type: 'checkpoint', id: cpId });
+  }
+
   private getTargetEditor(): vscode.TextEditor | undefined {
     return (
       vscode.window.activeTextEditor ??
@@ -196,8 +455,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private isCodeEditIntent(userMessage: string): boolean {
-    // Keyword-based intent detection (minimal + robust).
-    return /\b(change|update|modify|replace|create|generate|convert)\b/i.test(userMessage);
+    // If the user wants to create a *new* file, that's handled separately.
+    if (this.detectCreateFileIntent(userMessage)) { return false; }
+    // Broad keyword-based intent detection — anything that sounds like
+    // an action on code should go to the editor, not chat.
+    return /\b(change|update|modify|replace|create|generate|convert|enhance|improve|refactor|fix|optimise|optimize|rewrite|redesign|style|beautify|add|remove|delete|implement|build|make|write|edit|transform|migrate|upgrade|redo|revamp|restyle|tweak|adjust|clean|format|lint|minify|simplify|extend|expand|rework|overhaul|design|code|develop|scaffold|setup|set\s*up)\b/i.test(userMessage);
   }
 
   private determineTargetLanguage(
@@ -227,12 +489,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async buildCodebaseContext(
     doc: vscode.TextDocument,
-    hints?: { targetLanguageId?: string; instruction?: string }
+    hints?: { targetLanguageId?: string; instruction?: string },
+    skipCurrentFile: boolean = false
   ): Promise<string> {
-    // Keep context bounded to avoid huge prompts.
-    const MAX_CONTEXT_CHARS = 60_000;
-    const MAX_RELATED_FILES = 10;
-    const MAX_FILE_CHARS = 12_000;
+    // Keep context bounded — respect the model's token window
+    const charBudget = this.groqClient.getContextCharBudget();
+    const MAX_CONTEXT_CHARS = Math.min(charBudget, 30_000);
+    const MAX_RELATED_FILES = 6;
+    const MAX_FILE_CHARS = Math.min(Math.floor(charBudget / 3), 8_000);
 
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(doc.uri);
     const rootPath = workspaceFolder?.uri.fsPath;
@@ -255,8 +519,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       sections.push(`--- FILE: ${fileLabel} ---\n${clipped}`);
     };
 
-    // Always include the active file in full (or truncated).
-    addSection(currentRel, doc.getText());
+    // Include the active file only if we're NOT passing it separately via currentFileContent.
+    if (!skipCurrentFile) {
+      addSection(currentRel, doc.getText());
+    }
 
     // Add a short conversion hint to help the model transform formats (e.g., HTML -> React)
     if (hints?.targetLanguageId && hints.targetLanguageId !== doc.languageId) {
@@ -369,28 +635,97 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Replace the full document content with retry logic.
+   * Uses undoStopBefore/After: false so rapid streaming edits don't
+   * pollute the undo stack or collide with each other.
+   */
   private async replaceFullDocument(
     editor: vscode.TextEditor,
-    newText: string
-  ): Promise<void> {
-    const doc = editor.document;
-    const fullRange = new vscode.Range(
-      doc.positionAt(0),
-      doc.positionAt(doc.getText().length)
-    );
-
-    const ok = await editor.edit((editBuilder) => {
-      editBuilder.replace(fullRange, newText);
-    });
-
-    if (!ok) {
-      throw new Error('Failed to update the document.');
+    newText: string,
+    retries = 3
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const doc = editor.document;
+        const fullRange = new vscode.Range(
+          doc.positionAt(0),
+          doc.positionAt(doc.getText().length)
+        );
+        const ok = await editor.edit(
+          (eb) => { eb.replace(fullRange, newText); },
+          { undoStopBefore: false, undoStopAfter: false }
+        );
+        if (ok) { return true; }
+      } catch {
+        // editor disposed or otherwise unavailable
+      }
+      // Small delay before retry so VS Code can finish any pending edit
+      await new Promise(r => setTimeout(r, 120));
     }
+    console.warn('replaceFullDocument: all retries exhausted');
+    return false;
+  }
+
+  /**
+   * Helper: creates a serialised queue so only one editor.edit()
+   * is in-flight at a time. Returns a callback suitable for the
+   * streaming `onChunk` parameter.
+   */
+  private makeStreamUpdater(
+    editor: vscode.TextEditor,
+    minChars = 200
+  ): { onChunk: (accumulated: string) => void; flush: () => Promise<void> } {
+    let pending: string | null = null;
+    let lastLen = 0;
+    let busy = false;
+
+    const apply = async () => {
+      if (busy || pending === null) { return; }
+      busy = true;
+      const text = pending;
+      pending = null;
+      await this.replaceFullDocument(editor, text, 2);
+      busy = false;
+      // If more text arrived while we were writing, go again
+      if (pending !== null) { apply(); }
+    };
+
+    return {
+      onChunk(accumulated: string) {
+        if (accumulated.length - lastLen < minChars) { return; }
+        lastLen = accumulated.length;
+        pending = accumulated;
+        apply();
+      },
+      async flush() {
+        // Wait for any in-flight edit before the final write
+        while (busy) { await new Promise(r => setTimeout(r, 80)); }
+      }
+    };
   }
 
   // ===========================
   // UTILITIES
   // ===========================
+
+  private async handlePickFile() {
+    const files = await listWorkspaceFiles(200);
+    if (files.length === 0) {
+      vscode.window.showInformationMessage('No workspace files found.');
+      return;
+    }
+
+    const picked = await vscode.window.showQuickPick(files, {
+      placeHolder: 'Select a file to include as context (@file)',
+      canPickMany: true,
+    });
+
+    if (picked && picked.length > 0) {
+      const refs = picked.map(f => `@file ${f}`).join(' ');
+      this._view?.webview.postMessage({ type: 'insertFileRef', ref: refs });
+    }
+  }
 
   private clearConversation() {
     this.conversationHistory = [];
@@ -432,8 +767,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     padding: 10px;
     display: flex;
     justify-content: space-between;
+    align-items: center;
     border-bottom: 1px solid var(--vscode-panel-border);
   }
+  .header-actions { display: flex; gap: 6px; }
   .chat {
     flex: 1;
     overflow-y: auto;
@@ -451,6 +788,68 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     border: 1px solid var(--vscode-panel-border);
     white-space: pre-wrap;
   }
+  .msg-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2px;
+  }
+  .msg-actions {
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .msg:hover .msg-actions { opacity: 1; }
+  .msg-actions button {
+    background: none;
+    border: none;
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 5px;
+    border-radius: 3px;
+    opacity: 0.6;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  .msg-actions button:hover {
+    opacity: 1;
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
+  }
+  .msg-actions button.active-icon {
+    opacity: 1;
+    color: var(--vscode-notificationsInfoIcon-foreground, #3794ff);
+  }
+  /* Checkpoint banner */
+  .checkpoint-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    background: var(--vscode-editorWidget-background, #252526);
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .checkpoint-banner button {
+    padding: 4px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .btn-keep {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
+  .btn-discard {
+    background: var(--vscode-button-secondaryBackground, #3a3d41);
+    color: var(--vscode-button-secondaryForeground, #fff);
+  }
+  .btn-keep:hover { opacity: 0.9; }
+  .btn-discard:hover { opacity: 0.9; }
   .input {
     border-top: 1px solid var(--vscode-panel-border);
     padding: 10px;
@@ -463,6 +862,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     padding: 8px;
     background: var(--vscode-input-background);
     color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+    border-radius: 4px;
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+  }
+  .input-row {
+    display: flex;
+    gap: 6px;
+    align-items: flex-end;
+  }
+  .add-file-btn {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    border-radius: 4px;
+    background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .add-file-btn:hover {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
   }
   button {
     padding: 8px 14px;
@@ -470,24 +898,117 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     color: var(--vscode-button-foreground);
     border: none;
     cursor: pointer;
+    border-radius: 4px;
   }
   button:disabled {
     opacity: 0.5;
   }
+  .hint {
+    padding: 4px 12px;
+    font-size: 11px;
+    opacity: 0.6;
+  }
+  .loading-bar {
+    height: 3px;
+    background: var(--vscode-progressBar-background, #007acc);
+    animation: loading-pulse 1.5s ease-in-out infinite;
+    display: none;
+  }
+  .loading-bar.active { display: block; }
+  @keyframes loading-pulse {
+    0%   { width: 10%; margin-left: 0; }
+    50%  { width: 60%; margin-left: 20%; }
+    100% { width: 10%; margin-left: 90%; }
+  }
+  .typing {
+    display: none;
+    padding: 8px 12px;
+    font-size: 12px;
+    opacity: 0.7;
+    animation: blink 1s step-end infinite;
+  }
+  .typing.active { display: block; }
+  @keyframes blink {
+    50% { opacity: 0.3; }
+  }
+  /* ── File chip / attachment area ── */
+  .attached-files {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 10px 0;
+  }
+  .file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: var(--vscode-badge-background, #4d4d4d);
+    color: var(--vscode-badge-foreground, #fff);
+    border-radius: 10px;
+    font-size: 11px;
+    max-width: 220px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    border: 1px solid var(--vscode-panel-border);
+  }
+  .file-chip .icon {
+    opacity: 0.7;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .file-chip .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .file-chip .lang-badge {
+    font-size: 9px;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    flex-shrink: 0;
+    text-transform: uppercase;
+  }
+  .file-chip .remove {
+    cursor: pointer;
+    opacity: 0.5;
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .file-chip .remove:hover { opacity: 1; }
 </style>
 </head>
 
 <body>
   <div class="header">
-    <strong>AI Assistant</strong>
-    <button id="clear">Clear</button>
+    <strong>Prompt2Code</strong>
+    <div class="header-actions">
+      <button id="attach" title="Include a workspace file (@file)">📎</button>
+      <button id="clear" title="Clear conversation">🗑️</button>
+    </div>
   </div>
+
+  <div class="hint">
+    Use <b>@file path/to/file</b> to include files &middot;
+    <b>@workspace</b> for project tree &middot;
+    <b>"create file src/x.ts …"</b> to create new files
+  </div>
+
+  <div class="loading-bar" id="loadingBar"></div>
 
   <div class="chat" id="chat"></div>
 
+  <div class="typing" id="typingIndicator">⏳ Working… generating code in the editor</div>
+  <div class=\"attached-files\" id=\"attachedFiles\"></div>
   <div class="input">
-    <textarea id="input" rows="2" placeholder="Ask something..."></textarea>
-    <button id="send">Send</button>
+    <div class="input-row">
+      <button id="addFile" class="add-file-btn" title="Add file to context (+)">+</button>
+      <textarea id="input" rows="2" placeholder="Ask something… (use @file or @workspace for context)"></textarea>
+      <button id="send">Send</button>
+    </div>
   </div>
 
 <script>
@@ -496,17 +1017,54 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const input = document.getElementById('input');
   const send = document.getElementById('send');
   const clear = document.getElementById('clear');
+  const attach = document.getElementById('attach');
+  const addFile = document.getElementById('addFile');
+  const loadingBar = document.getElementById('loadingBar');
+  const typingIndicator = document.getElementById('typingIndicator');
+  const attachedFilesEl = document.getElementById('attachedFiles');
 
   let loading = false;
 
+  // ── Tracked / attached files state ──
+  // { relPath, fileName, languageId, source: 'active'|'manual' }
+  let trackedFiles = [];
+
+  function renderChips() {
+    attachedFilesEl.innerHTML = '';
+    for (const f of trackedFiles) {
+      const chip = document.createElement('span');
+      chip.className = 'file-chip';
+      chip.innerHTML =
+        '<span class=\"icon\">\ud83d\udcc4</span>' +
+        '<span class=\"name\" title=\"' + f.relPath + '\">' + f.fileName + '</span>' +
+        (f.languageId ? '<span class=\"lang-badge\">' + f.languageId + '</span>' : '') +
+        '<span class=\"remove\" title=\"Remove\">\u00d7</span>';
+      chip.querySelector('.remove').onclick = () => {
+        trackedFiles = trackedFiles.filter(t => t.relPath !== f.relPath);
+        renderChips();
+        vscode.postMessage({ type: 'removeTrackedFile', relPath: f.relPath });
+      };
+      attachedFilesEl.appendChild(chip);
+    }
+  }
+
   send.onclick = () => {
     if (!input.value.trim() || loading) return;
-    vscode.postMessage({ type: 'sendMessage', message: input.value });
+    const files = trackedFiles.map(f => f.relPath);
+    vscode.postMessage({ type: 'sendMessage', message: input.value, attachedFiles: files });
     input.value = '';
   };
 
   clear.onclick = () => {
     vscode.postMessage({ type: 'clearChat' });
+  };
+
+  attach.onclick = () => {
+    vscode.postMessage({ type: 'pickFile' });
+  };
+
+  addFile.onclick = () => {
+    vscode.postMessage({ type: 'pickFile' });
   };
 
   input.addEventListener('keydown', e => {
@@ -524,24 +1082,139 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (msg.type === 'loading') {
       loading = msg.isLoading;
       send.disabled = loading;
+      loadingBar.className = msg.isLoading ? 'loading-bar active' : 'loading-bar';
+      typingIndicator.className = msg.isLoading ? 'typing active' : 'typing';
     }
     if (msg.type === 'clearMessages') chat.innerHTML = '';
     if (msg.type === 'error') add('Error', msg.message, 'assistant');
+    if (msg.type === 'checkpoint') {
+      latestCheckpointId = msg.id;
+      addCheckpointBanner(msg.id);
+    }
+    if (msg.type === 'insertFileRef') {
+      // From the 📎 file picker — add as a manual chip
+      const refs = msg.ref.split(/\\s+/).filter(Boolean);
+      for (const r of refs) {
+        const cleaned = r.replace(/^@file\\s*/i, '');
+        if (cleaned && !trackedFiles.find(t => t.relPath === cleaned)) {
+          const parts = cleaned.split('/');
+          trackedFiles.push({ relPath: cleaned, fileName: parts[parts.length - 1], languageId: '', source: 'manual' });
+        }
+      }
+      renderChips();
+      input.focus();
+    }
+    if (msg.type === 'activeFile') {
+      // Update the auto-tracked active file chip
+      trackedFiles = trackedFiles.filter(t => t.source !== 'active');
+      if (msg.fileName && msg.relPath) {
+        trackedFiles.unshift({
+          relPath: msg.relPath,
+          fileName: msg.fileName,
+          languageId: msg.languageId || '',
+          source: 'active'
+        });
+      }
+      renderChips();
+    }
   });
+
+  // Track the latest checkpoint id so the restore button can use it
+  let latestCheckpointId = null;
 
   function add(title, text, cls) {
     const div = document.createElement('div');
     div.className = 'msg ' + cls;
 
+    // Header row: title + action buttons
+    const header = document.createElement('div');
+    header.className = 'msg-header';
+
     const strong = document.createElement('strong');
     strong.textContent = title;
+    header.appendChild(strong);
+
+    const actions = document.createElement('span');
+    actions.className = 'msg-actions';
+
+    // 1️⃣ Edit button — loads text into input for re-sending
+    const editBtn = document.createElement('button');
+    editBtn.title = 'Edit';
+    editBtn.textContent = '✏️';
+    editBtn.onclick = () => {
+      input.value = text;
+      input.focus();
+      if (cls === 'user') {
+        // Remove this message and everything after it
+        while (chat.lastChild && chat.lastChild !== div) {
+          chat.removeChild(chat.lastChild);
+        }
+        if (chat.lastChild === div) chat.removeChild(div);
+        vscode.postMessage({ type: 'trimHistory', content: text });
+      }
+    };
+    actions.appendChild(editBtn);
+
+    // 2️⃣ Copy button
+    const copyBtn = document.createElement('button');
+    copyBtn.title = 'Copy';
+    copyBtn.textContent = '📋';
+    copyBtn.onclick = () => {
+      vscode.postMessage({ type: 'copyCode', code: text });
+      copyBtn.textContent = '✓';
+      copyBtn.classList.add('active-icon');
+      setTimeout(() => { copyBtn.textContent = '📋'; copyBtn.classList.remove('active-icon'); }, 1200);
+    };
+    actions.appendChild(copyBtn);
+
+    // 3️⃣ Restore code button — reverts editor to the last checkpoint
+    const restoreBtn = document.createElement('button');
+    restoreBtn.title = 'Restore previous code';
+    restoreBtn.textContent = '🔄';
+    restoreBtn.onclick = () => {
+      if (latestCheckpointId) {
+        vscode.postMessage({ type: 'checkpointAction', action: 'discard', id: latestCheckpointId });
+        restoreBtn.textContent = '✓';
+        restoreBtn.classList.add('active-icon');
+        setTimeout(() => { restoreBtn.textContent = '🔄'; restoreBtn.classList.remove('active-icon'); }, 1500);
+      } else {
+        restoreBtn.textContent = '—';
+        setTimeout(() => { restoreBtn.textContent = '🔄'; }, 1000);
+      }
+    };
+    actions.appendChild(restoreBtn);
+
+    header.appendChild(actions);
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
 
-    div.appendChild(strong);
+    div.appendChild(header);
     div.appendChild(bubble);
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  // Handle checkpoint banner
+  function addCheckpointBanner(checkpointId) {
+    const div = document.createElement('div');
+    div.className = 'checkpoint-banner';
+    div.id = 'checkpoint-' + checkpointId;
+    div.innerHTML =
+      '<span>💾 Checkpoint saved</span>' +
+      '<button class="btn-keep" data-action="keep">✓ Keep</button>' +
+      '<button class="btn-discard" data-action="discard">↩ Undo changes</button>';
+    div.querySelector('.btn-keep').onclick = () => {
+      vscode.postMessage({ type: 'checkpointAction', action: 'keep', id: checkpointId });
+      div.innerHTML = '<span>✅ Changes kept</span>';
+      setTimeout(() => div.remove(), 2000);
+    };
+    div.querySelector('.btn-discard').onclick = () => {
+      vscode.postMessage({ type: 'checkpointAction', action: 'discard', id: checkpointId });
+      div.innerHTML = '<span>↩ Restored to previous state</span>';
+      setTimeout(() => div.remove(), 2000);
+    };
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
   }

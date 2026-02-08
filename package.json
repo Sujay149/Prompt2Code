@@ -1,8 +1,8 @@
 {
   "name": "prompt2code",
   "displayName": "Prompt2Code",
-  "description": "Prompt-driven code generation and inline completions inside VS Code (powered by Groq)",
-  "version": "1.0.1",
+  "description": "Prompt-driven code generation and inline completions inside VS Code",
+  "version": "1.0.2",
   "publisher": "SujayBabuThota",
   "repository": {
     "type": "git",
@@ -62,6 +62,10 @@
         "command": "prompt2code.openChat",
         "title": "Prompt2Code: Open Chat",
         "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "prompt2code.createFile",
+        "title": "Prompt2Code: Create File with AI"
       }
     ],
     "keybindings": [
@@ -96,7 +100,7 @@
         },
         "prompt2code.maxTokens": {
           "type": "number",
-          "default": 2048,
+          "default": 4096,
           "description": "Maximum tokens in response",
           "order": 3
         },
