@@ -141,33 +141,81 @@ export async function createWorkspaceFileQuiet(
  */
 export function parseMultiFileResponse(response: string): { path: string; content: string }[] {
   const files: { path: string; content: string }[] = [];
-  // Match ===FILE: path=== ... ===END_FILE===  blocks
-  const pattern = /===FILE:\s*(.+?)\s*===\n([\s\S]*?)(?:===END_FILE===|(?====FILE:))/g;
-  let match: RegExpExecArray | null;
+  const seen = new Set<string>();
 
-  while ((match = pattern.exec(response))) {
-    const filePath = match[1].trim();
-    let content = match[2];
-    // Remove trailing ===END_FILE=== if caught inside
-    content = content.replace(/===END_FILE===\s*$/, '').trimEnd();
-    if (filePath && content) {
+  // ── Strategy 1: ===FILE: path=== ... ===END_FILE=== blocks ──
+  const pattern1 = /===\s*FILE:\s*(.+?)\s*===\s*\n([\s\S]*?)(?:===\s*END_FILE\s*===|(?=\n===\s*FILE:))/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern1.exec(response))) {
+    const filePath = cleanFilePath(match[1]);
+    let content = match[2].replace(/===\s*END_FILE\s*===\s*$/, '').trimEnd();
+    if (filePath && content && !seen.has(filePath)) {
+      seen.add(filePath);
+      files.push({ path: filePath, content });
+    }
+  }
+  if (files.length > 0) { return files; }
+
+  // ── Strategy 2: ```language:path or ```path (common AI formats) ──
+  //   ```tsx:src/App.tsx    or   ```src/App.tsx   or   ```typescript // src/App.tsx
+  const pattern2 = /```[\w]*(?:[:]\s*|\s+\/\/\s*|\s+#\s*|\s+)([\w][\w/\\.-]+\.\w{1,6})\s*\n([\s\S]*?)```/g;
+  while ((match = pattern2.exec(response))) {
+    const filePath = cleanFilePath(match[1]);
+    const content = match[2].trimEnd();
+    if (filePath && content && !seen.has(filePath)) {
+      seen.add(filePath);
+      files.push({ path: filePath, content });
+    }
+  }
+  if (files.length > 0) { return files; }
+
+  // ── Strategy 3: ```file:path fenced blocks ──
+  const pattern3 = /```(?:\w+)?\s*(?:file:\s*(.+?))\n([\s\S]*?)```/g;
+  while ((match = pattern3.exec(response))) {
+    const filePath = cleanFilePath(match[1]);
+    const content = match[2].trimEnd();
+    if (filePath && content && !seen.has(filePath)) {
+      seen.add(filePath);
+      files.push({ path: filePath, content });
+    }
+  }
+  if (files.length > 0) { return files; }
+
+  // ── Strategy 4: "## File: path" or "### path" or "// File: path" header patterns
+  //    followed by a code fence ──
+  const pattern4 = /(?:^|\n)(?:#{1,4}\s+(?:File:\s*)?|\/\/\s*(?:File:\s*)?|<!--\s*)([\w][\w/\\.-]+\.\w{1,6})\s*(?:-->)?\s*\n\s*```[\w]*\n([\s\S]*?)```/g;
+  while ((match = pattern4.exec(response))) {
+    const filePath = cleanFilePath(match[1]);
+    const content = match[2].trimEnd();
+    if (filePath && content && !seen.has(filePath)) {
+      seen.add(filePath);
+      files.push({ path: filePath, content });
+    }
+  }
+  if (files.length > 0) { return files; }
+
+  // ── Strategy 5: Numbered list of paths followed by code fences ──
+  //   e.g. "1. `src/index.ts`:\n```ts\n...```"
+  const pattern5 = /\d+\.\s*`?([\w][\w/\\.-]+\.\w{1,6})`?\s*:?\s*\n\s*```[\w]*\n([\s\S]*?)```/g;
+  while ((match = pattern5.exec(response))) {
+    const filePath = cleanFilePath(match[1]);
+    const content = match[2].trimEnd();
+    if (filePath && content && !seen.has(filePath)) {
+      seen.add(filePath);
       files.push({ path: filePath, content });
     }
   }
 
-  // Fallback: if no blocks found, try single ```file:path``` fenced blocks
-  if (files.length === 0) {
-    const fencedPattern = /```(?:\w+)?\s*(?:file:\s*(.+?))\n([\s\S]*?)```/g;
-    while ((match = fencedPattern.exec(response))) {
-      const filePath = match[1].trim();
-      const content = match[2].trimEnd();
-      if (filePath && content) {
-        files.push({ path: filePath, content });
-      }
-    }
-  }
-
   return files;
+}
+
+/** Normalize a file path from the AI: strip leading slashes, backticks, quotes */
+function cleanFilePath(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^[`"']+|[`"']+$/g, '')  // strip quotes/backticks
+    .replace(/^\.?\//, '')              // strip leading ./ or /
+    .replace(/\\/g, '/');               // normalize backslashes
 }
 
 /**

@@ -1008,17 +1008,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    */
   private isMultiFileIntent(msg: string): boolean {
     const lower = msg.toLowerCase();
-    // Explicit multi-file patterns
-    if (/\b(scaffold|boilerplate|project structure|folder structure|file structure)\b/i.test(lower)) { return true; }
+
+    // Explicit multi-file / scaffold keywords
+    if (/\b(scaffold|boilerplate|project structure|folder structure|file structure|codebase|full[- ]?stack)\b/i.test(lower)) { return true; }
+
+    // "create / build / make / develop / generate  ...  app / project / application / website / page / site / dashboard / system / platform"
+    if (/\b(create|build|make|develop|generate|design|implement|code|write)\b.{0,40}\b(app|application|project|website|web\s*site|landing\s*page|web\s*app|webapp|webpage|web\s*page|dashboard|portal|platform|system|api|server|backend|frontend|front[- ]?end|back[- ]?end|cli|tool|game|clone|replica|template|starter|demo|prototype|mvp|saas)\b/i.test(lower)) { return true; }
+
+    // "create all/multiple/several files/components/pages"
     if (/\bcreate\s+(all|multiple|several|the)\s+(files|components|pages|modules|routes)\b/i.test(lower)) { return true; }
+
+    // "set up a/the project/app"
     if (/\bset\s*up\s+(a |the )?(project|app|application|repo|repository)\b/i.test(lower)) { return true; }
+
+    // "... using React / with Express / in Next.js" — framework-based requests are inherently multi-file
+    if (/\b(create|build|make|develop)\b/i.test(lower) && /\b(react|vue|angular|svelte|next\.?js|nuxt|express|fastapi|flask|django|spring|laravel|rails|nest\.?js|gatsby|remix|astro|vite|tailwind)\b/i.test(lower)) { return true; }
+
+    // "todo app", "calculator app", "chat app", "blog app" etc. — noun + app/application
+    if (/\b\w+\s+(app|application|website|webpage|page)\b/i.test(lower) && /\b(create|build|make|develop|generate|write|code|give|can you|i want|i need|please)\b/i.test(lower)) { return true; }
+
     // Mentions 2+ file paths
     const filePathMentions = lower.match(/\b[\w/\\-]+\.\w{1,5}\b/g) || [];
     if (filePathMentions.length >= 2) { return true; }
+
     // "create X and Y" pattern
     if (/\bcreate\b.+\band\b.+\b(file|component|page|module)\b/i.test(lower)) { return true; }
+
     // "with files" / "with components"
-    if (/\bwith\s+(files|components|pages|modules|routes|folders)\b/i.test(lower)) { return true; }
+    if (/\bwith\s+(files|components|pages|modules|routes|folders|endpoints|screens|views|templates)\b/i.test(lower)) { return true; }
+
     return false;
   }
 
@@ -1050,21 +1068,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const systemPrompt = [
       'You are an expert developer generating MULTIPLE FILES for a project.',
       '',
-      'RULES (FOLLOW EXACTLY):',
+      'CRITICAL RULES (FOLLOW EXACTLY):',
       '- Output each file using this EXACT format:',
       '',
       '===FILE: path/to/file.ext===',
-      '...file content...',
+      '...complete file content...',
       '===END_FILE===',
       '',
-      '- Use relative paths from the workspace root.',
-      '- Match the existing project structure, conventions, and style.',
-      '- Create complete, production-ready file contents.',
+      '- Use relative paths from the workspace root (e.g. src/index.ts, not ./src/index.ts).',
+      '- Generate ALL necessary files for a working project.',
+      '- Include package.json, config files, and entry points as needed.',
+      '- Create complete, production-ready file contents — not stubs or placeholders.',
       '- Include proper imports, exports, and type annotations.',
-      '- Do NOT add markdown, explanations, or comments outside of file blocks.',
-      '- Do NOT wrap file blocks in code fences.',
+      '- Do NOT add markdown, explanations, or commentary outside of file blocks.',
+      '- Do NOT wrap the ===FILE=== blocks inside code fences.',
       '- If modifying an existing file, output the COMPLETE updated file content.',
       '- Order files so dependencies come before dependents.',
+      '- For web apps, include HTML, CSS, and JS/TS files as needed.',
+      '- For Node.js projects, include package.json with dependencies.',
+      '- Start generating files IMMEDIATELY — no preamble text.',
     ].join('\n');
 
     let userPrompt = `Instruction: ${instruction}\n\n`;
@@ -1074,15 +1096,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const budget = Math.floor(charBudget * 0.6);
       userPrompt += `Project context:\n${ctx.length > budget ? ctx.slice(0, budget) + '\n/* ...trimmed... */' : ctx}\n\n`;
     }
-    userPrompt += 'Generate the files now. Use ===FILE: path=== and ===END_FILE=== delimiters for each file.';
+    userPrompt += 'Generate the files now. Start with ===FILE: path=== immediately.';
 
     const messages: GroqMessage[] = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ];
 
-    console.log('🚀 Calling Groq API (multi-file generation)...');
-    const rawResponse = await this.groqClient.complete(messages, false);
+    console.log('🚀 Calling Groq API (multi-file generation with continuation)...');
+    const rawResponse = await this.groqClient.completeWithContinuation(messages, { maxContinuations: 5 });
 
     // Parse structured file blocks from the response
     const fileBlocks = parseMultiFileResponse(rawResponse);

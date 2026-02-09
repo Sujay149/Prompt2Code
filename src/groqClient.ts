@@ -287,6 +287,67 @@ export class GroqClient {
     return cleanMarkdown ? this.cleanResponse(result.content) : result.content;
   }
 
+  /**
+   * Multi-file / long-form completion with automatic continuation.
+   * Uses the same continuation strategy as generateCode() so that
+   * large multi-file outputs are not truncated at maxTokens.
+   */
+  async completeWithContinuation(
+    messages: GroqMessage[],
+    options?: { maxContinuations?: number }
+  ): Promise<string> {
+    const config = this.getConfig();
+    const inputTokens = GroqClient.estimateTokens(
+      messages.map(m => m.content).join('')
+    );
+    const modelWindow = GroqClient.MODEL_WINDOWS[config.model] ?? 8_000;
+    // Use a generous maxTokens — at least 8192, up to what the model allows
+    const maxTokens = Math.min(
+      Math.max(config.maxTokens ?? 0, 8192),
+      Math.max(modelWindow - inputTokens - 200, 2048)
+    );
+    const MAX_CONTINUATIONS = options?.maxContinuations ?? 5;
+    const ASSISTANT_CONTEXT_CHARS = 6000;
+
+    let assembled = '';
+
+    for (let attempt = 0; attempt < MAX_CONTINUATIONS; attempt++) {
+      const callMessages: GroqMessage[] = attempt === 0
+        ? messages
+        : [
+            ...messages,
+            {
+              role: 'assistant' as const,
+              content: assembled.slice(-ASSISTANT_CONTEXT_CHARS)
+            },
+            {
+              role: 'user' as const,
+              content:
+                'Continue generating the remaining files. Pick up EXACTLY where you left off.\n' +
+                'Rules:\n' +
+                '- Do NOT repeat any content already generated.\n' +
+                '- Continue using the same ===FILE: path=== and ===END_FILE=== format.\n' +
+                '- If you were in the middle of a file, continue that file first.\n' +
+                '- Do NOT add any explanatory text.\n\n' +
+                'The output so far ends with:\n' +
+                assembled.slice(-1500)
+            }
+          ];
+
+      const result = await this.requestCompletion(callMessages, { maxTokens });
+      const piece = result.content;
+      assembled = this.appendAvoidingOverlap(assembled, piece);
+
+      // Stop if the model finished naturally (not cut off by token limit)
+      if (result.finishReason !== 'length') {
+        break;
+      }
+      console.log(`📄 Multi-file continuation ${attempt + 1}/${MAX_CONTINUATIONS} — output so far: ${assembled.length} chars`);
+    }
+
+    return assembled;
+  }
+
   // ===========================
   // CODE GENERATION
   // ===========================

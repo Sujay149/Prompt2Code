@@ -30,7 +30,8 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewType,
-      chatViewProvider
+      chatViewProvider,
+      { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
 
