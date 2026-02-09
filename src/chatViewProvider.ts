@@ -1244,18 +1244,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // WEBVIEW HTML
   // ===========================
 
-  private getHtml(_webview: vscode.Webview): string {
+  private getNonce(): string {
+    let text = '';
+    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < 32; i++) {
+      text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
+  }
+
+  private getHtml(webview: vscode.Webview): string {
+    const nonce = this.getNonce();
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" style="height:100%;">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
+  * { box-sizing: border-box; }
   body {
+    margin: 0;
+    padding: 0;
     font-family: var(--vscode-font-family);
     background: var(--vscode-sideBar-background);
     color: var(--vscode-foreground);
-    height: 100vh;
+    height: 100%;
     display: flex;
     flex-direction: column;
   }
@@ -1619,7 +1633,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
-<script>
+<script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const chat = document.getElementById('chat');
   const input = document.getElementById('input');

@@ -40,6 +40,9 @@ export function activate(context: vscode.ExtensionContext) {
   // Register inline completion provider
   registerInlineCompletionProvider(context);
 
+  // Register auto-trigger on comment completion
+  registerAutoTrigger(context);
+
   // Load initial settings
   const config = vscode.workspace.getConfiguration('prompt2code');
   inlineCompletionsEnabled = config.get<boolean>('enableInlineCompletions', true);
@@ -321,15 +324,16 @@ function registerInlineCompletionProvider(context: vscode.ExtensionContext) {
 
   // Register provider for all supported languages
   const disposable = vscode.languages.registerInlineCompletionItemProvider(
-    supportedLanguages.map(lang => ({ language: lang })),
+    supportedLanguages.map(lang => ({ language: lang, scheme: 'file' })),
     provider
   );
 
   context.subscriptions.push(disposable);
 }
 
+function registerAutoTrigger(context: vscode.ExtensionContext) {
 // Add automatic trigger on comment completion
-vscode.workspace.onDidChangeTextDocument(async (event) => {
+context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(async (event) => {
   if (!vscode.window.activeTextEditor) {
     return;
   }
@@ -368,7 +372,8 @@ vscode.workspace.onDidChangeTextDocument(async (event) => {
       }, 500);
     }
   }
-});
+}));
+}
 
 export function deactivate() {
   console.log('Prompt2Code deactivated');
