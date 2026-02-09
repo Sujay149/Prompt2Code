@@ -5,8 +5,13 @@ import * as http from 'http';
 
 export interface GroqMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | GroqContentPart[];
 }
+
+/** Multimodal content part for vision messages */
+export type GroqContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
 
 export interface GroqRequest {
   model: string;
@@ -42,6 +47,9 @@ export class GroqClient {
    * We leave room for output (max_tokens) so the *input* budget is
    * windowSize − maxOutputTokens.
    */
+  /** Vision model used for image-to-code */
+  static readonly VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+
   private static readonly MODEL_WINDOWS: Record<string, number> = {
     'llama-3.3-70b-versatile':   128_000,
     'llama-3.1-70b-versatile':   128_000,
@@ -50,6 +58,7 @@ export class GroqClient {
     'llama-3.2-3b-preview':      8_000,
     'mixtral-8x7b-32768':        32_768,
     'gemma2-9b-it':              8_000,
+    'meta-llama/llama-4-scout-17b-16e-instruct': 128_000,
   };
 
   /** Human-friendly model metadata for the selector UI. */
@@ -61,6 +70,7 @@ export class GroqClient {
     { id: 'llama-3.2-3b-preview',    label: 'Llama 3.2 3B',    ctx: '8K'   },
     { id: 'mixtral-8x7b-32768',      label: 'Mixtral 8x7B',    ctx: '32K'  },
     { id: 'gemma2-9b-it',            label: 'Gemma 2 9B',      ctx: '8K'   },
+    { id: 'meta-llama/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout (Vision)', ctx: '128K' },
   ];
 
   /** Session-level model override (set by the UI model selector). */
@@ -79,6 +89,15 @@ export class GroqClient {
   /** Rough chars-per-token ratio (≈ 3.5 for English code). */
   static estimateTokens(text: string): number {
     return Math.ceil(text.length / 3.5);
+  }
+
+  /** Safely extract text content from a message's content field. */
+  private static contentToString(content: string | GroqContentPart[]): string {
+    if (typeof content === 'string') { return content; }
+    return content
+      .filter(p => p.type === 'text')
+      .map(p => (p as { type: 'text'; text: string }).text)
+      .join(' ');
   }
 
   /**
@@ -208,7 +227,9 @@ export class GroqClient {
         );
 
         const choice = response.data?.choices?.[0];
-        const content = choice?.message?.content;
+        const content = typeof choice?.message?.content === 'string'
+          ? choice.message.content
+          : '';
 
         if (!content || !content.trim()) {
           throw new Error('Groq returned an empty response');
@@ -298,7 +319,7 @@ export class GroqClient {
   ): Promise<string> {
     const config = this.getConfig();
     const inputTokens = GroqClient.estimateTokens(
-      messages.map(m => m.content).join('')
+      messages.map(m => GroqClient.contentToString(m.content)).join('')
     );
     const modelWindow = GroqClient.MODEL_WINDOWS[config.model] ?? 8_000;
     // Use a generous maxTokens — at least 8192, up to what the model allows
@@ -349,6 +370,144 @@ export class GroqClient {
   }
 
   // ===========================
+  // IMAGE-TO-CODE (VISION)
+  // ===========================
+
+  /**
+   * Analyse a UI screenshot and generate code that reproduces it.
+   * Uses the Llama 4 Scout vision model with base64-encoded image.
+   * Supports continuation for large multi-file outputs.
+   */
+  async imageToCode(
+    base64Image: string,
+    mimeType: string,
+    instruction: string,
+    targetLanguage?: string
+  ): Promise<string> {
+    const config = this.getConfig();
+    const apiKey = this.getApiKeyForModel(GroqClient.VISION_MODEL)
+      || config.apiKey;
+
+    if (!apiKey) {
+      throw new Error('No API key configured. Set an API key for the vision model (Llama 4 Scout) or a global key.');
+    }
+
+    const lang = targetLanguage || 'HTML/CSS/JavaScript';
+
+    const systemPrompt = [
+      `You are an expert UI developer. You will receive a screenshot of a user interface.`,
+      `Your job is to recreate that UI as faithfully as possible using ${lang}.`,
+      '',
+      'RULES:',
+      '- Reproduce the layout, colors, fonts, spacing, and visual hierarchy precisely.',
+      '- Use modern, clean, production-quality code.',
+      '- For web UIs: use semantic HTML5, CSS3 (flexbox/grid), and vanilla JS unless asked otherwise.',
+      '- Match colors by approximating from the image (use hex codes).',
+      '- Include placeholder text/images where you see them in the screenshot.',
+      '- If the UI has multiple pages/components, output each as a separate file.',
+      '- For multi-file output, use this exact format:',
+      '',
+      '===FILE: path/to/file.ext===',
+      '...file content...',
+      '===END_FILE===',
+      '',
+      '- For a single file, just output the code directly — no file delimiters needed.',
+      '- Do NOT add explanations or markdown. Output code ONLY.',
+      '- Start generating code IMMEDIATELY.',
+    ].join('\n');
+
+    const userContent: GroqContentPart[] = [
+      {
+        type: 'image_url',
+        image_url: {
+          url: `data:${mimeType};base64,${base64Image}`
+        }
+      },
+      {
+        type: 'text',
+        text: instruction || `Recreate this UI exactly as shown in the image using ${lang}. Output production-ready code.`
+      }
+    ];
+
+    const messages: GroqMessage[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent }
+    ];
+
+    // Vision model: use larger maxTokens and continuation
+    const maxTokens = 8192;
+    const MAX_CONTINUATIONS = 4;
+    const ASSISTANT_CONTEXT_CHARS = 4000;
+
+    let assembled = '';
+
+    for (let attempt = 0; attempt < MAX_CONTINUATIONS; attempt++) {
+      const callMessages: GroqMessage[] = attempt === 0
+        ? messages
+        : [
+            // For continuations, use text-only (no image resend — too large)
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: instruction || `Recreate this UI from the screenshot using ${lang}.` },
+            {
+              role: 'assistant',
+              content: assembled.slice(-ASSISTANT_CONTEXT_CHARS)
+            },
+            {
+              role: 'user',
+              content:
+                'Continue generating the remaining code. Pick up EXACTLY where you left off.\n' +
+                '- Do NOT repeat any content already generated.\n' +
+                '- Continue using the same format (===FILE: path=== if multi-file).\n' +
+                '- Do NOT add any explanatory text.\n\n' +
+                'The output so far ends with:\n' +
+                assembled.slice(-1200)
+            }
+          ];
+
+      // Use the vision model for the first call; any text model for continuations
+      const modelToUse = attempt === 0
+        ? GroqClient.VISION_MODEL
+        : (this._modelOverride ?? config.model);
+
+      const request = {
+        model: modelToUse,
+        messages: callMessages,
+        max_tokens: maxTokens,
+        temperature: config.temperature,
+        stream: false
+      };
+
+      const response = await axios.post<GroqResponse>(
+        this.baseUrl,
+        request,
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 60000  // Vision requests may be slower
+        }
+      );
+
+      const choice = response.data?.choices?.[0];
+      const content = choice?.message?.content;
+      if (!content || typeof content !== 'string') {
+        if (assembled) { break; }
+        throw new Error('Groq vision model returned an empty response');
+      }
+
+      assembled = this.appendAvoidingOverlap(assembled, content);
+
+      if (choice?.finish_reason !== 'length') {
+        break;
+      }
+      console.log(`🖼️ Vision continuation ${attempt + 1}/${MAX_CONTINUATIONS} — ${assembled.length} chars`);
+    }
+
+    return assembled;
+  }
+
+  // ===========================
   // CODE GENERATION
   // ===========================
   async generateCode(
@@ -371,7 +530,7 @@ export class GroqClient {
     // Make code generation more robust for full-file outputs.
     const config = this.getConfig();
     const inputTokens = GroqClient.estimateTokens(
-      baseMessages.map(m => m.content).join('')
+      baseMessages.map(m => GroqClient.contentToString(m.content)).join('')
     );
     const modelWindow = GroqClient.MODEL_WINDOWS[config.model] ?? 8_000;
     const maxTokens = Math.min(

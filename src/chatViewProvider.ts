@@ -73,6 +73,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.handleUserMessage(data.message, data.attachedFiles || []);
           break;
 
+        case 'sendImageMessage':
+          await this.handleImageToCode(data.message, data.imageBase64, data.mimeType, data.fileName);
+          break;
+
         case 'clearChat':
           this.clearConversation();
           break;
@@ -1167,6 +1171,147 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     vscode.window.showInformationMessage(`Prompt2Code: Created ${created.length} files`);
   }
 
+  // ===========================
+  // IMAGE-TO-CODE — Vision-based UI replication
+  // ===========================
+
+  private async handleImageToCode(
+    instruction: string,
+    imageBase64: string,
+    mimeType: string,
+    fileName: string
+  ): Promise<void> {
+    // Show user message with image indicator
+    this._view?.webview.postMessage({
+      type: 'userMessage',
+      message: `🖼️ [Image: ${fileName}] ${instruction}`
+    });
+    this.conversationHistory.push({ role: 'user', content: `[Image: ${fileName}] ${instruction}` });
+
+    this._view?.webview.postMessage({ type: 'loading', isLoading: true });
+
+    try {
+      // Check API key
+      const visionModel = GroqClient.VISION_MODEL;
+      const apiKey = this.groqClient.getApiKeyForModel(visionModel);
+      const globalKey = this.groqClient.getApiKeyForModel(this.groqClient.getActiveModel());
+      if (!apiKey && !globalKey) {
+        throw new Error(
+          '⚠️ No API key configured. Set a global API key or a key for the Llama 4 Scout (Vision) model.\n\n' +
+          'Get your free API key at: https://console.groq.com'
+        );
+      }
+
+      // Determine target language from user instruction or current editor
+      const editor = this.getTargetEditor();
+      let targetLang = 'HTML/CSS/JavaScript';
+      if (/\breact\b/i.test(instruction)) { targetLang = 'React (JSX/TSX with Tailwind CSS)'; }
+      else if (/\bvue\b/i.test(instruction)) { targetLang = 'Vue.js (Single File Components)'; }
+      else if (/\bsvelte\b/i.test(instruction)) { targetLang = 'Svelte'; }
+      else if (/\bangular\b/i.test(instruction)) { targetLang = 'Angular (TypeScript)'; }
+      else if (/\btailwind\b/i.test(instruction)) { targetLang = 'HTML with Tailwind CSS'; }
+      else if (/\bnext\.?js\b/i.test(instruction)) { targetLang = 'Next.js (React/TypeScript)'; }
+      else if (editor?.document.languageId === 'typescriptreact') { targetLang = 'React (TSX)'; }
+      else if (editor?.document.languageId === 'javascriptreact') { targetLang = 'React (JSX)'; }
+
+      this._view?.webview.postMessage({
+        type: 'assistantMessage',
+        message: `🖼️ Analyzing screenshot and generating ${targetLang} code…`
+      });
+
+      // Call vision model
+      const rawResponse = await this.groqClient.imageToCode(
+        imageBase64,
+        mimeType,
+        instruction,
+        targetLang
+      );
+
+      // Check if the response contains multiple files
+      const fileBlocks = parseMultiFileResponse(rawResponse);
+
+      if (fileBlocks.length > 0) {
+        // Multi-file output — create files in workspace
+        const created: string[] = [];
+        const failed: string[] = [];
+        let firstUri: vscode.Uri | undefined;
+
+        for (const block of fileBlocks) {
+          try {
+            const uri = await createWorkspaceFileQuiet(block.path, block.content);
+            if (uri) {
+              created.push(block.path);
+              if (!firstUri) { firstUri = uri; }
+            } else {
+              failed.push(block.path);
+            }
+          } catch (err: any) {
+            console.error(`Failed to create ${block.path}:`, err);
+            failed.push(block.path);
+          }
+        }
+
+        if (firstUri) {
+          try {
+            const doc = await vscode.workspace.openTextDocument(firstUri);
+            await vscode.window.showTextDocument(doc, { preview: false });
+          } catch { /* non-fatal */ }
+        }
+
+        let summary = `✅ Generated ${created.length} file${created.length !== 1 ? 's' : ''} from screenshot:\n\n`;
+        for (const f of created) { summary += `  📄 ${f}\n`; }
+        if (failed.length > 0) {
+          summary += `\n⚠️ Failed: ${failed.join(', ')}`;
+        }
+
+        this._view?.webview.postMessage({ type: 'assistantMessage', message: summary });
+        this.conversationHistory.push({ role: 'assistant', content: summary });
+        vscode.window.showInformationMessage(`Prompt2Code: Generated ${created.length} files from image`);
+      } else {
+        // Single file output — insert into editor or show as chat
+        const cleanCode = rawResponse
+          .replace(/^```[\w]*\n?/gm, '')
+          .replace(/```\s*$/gm, '')
+          .trim();
+
+        if (editor && editor.document) {
+          // Save checkpoint
+          const cpId = String(++this.checkpointCounter);
+          this.checkpoints.set(cpId, { uri: editor.document.uri, content: editor.document.getText() });
+          this._view?.webview.postMessage({ type: 'linkCheckpoint', checkpointId: cpId });
+
+          const fullRange = new vscode.Range(
+            editor.document.positionAt(0),
+            editor.document.positionAt(editor.document.getText().length)
+          );
+          await editor.edit(eb => { eb.replace(fullRange, cleanCode); });
+          vscode.window.showInformationMessage('Code generated from screenshot and inserted into editor');
+          this._view?.webview.postMessage({
+            type: 'assistantMessage',
+            message: '✅ UI code generated from screenshot and inserted into the editor.'
+          });
+        } else {
+          // No editor — show code as chat message
+          this._view?.webview.postMessage({
+            type: 'assistantMessage',
+            message: '```\n' + cleanCode + '\n```'
+          });
+        }
+        this.conversationHistory.push({ role: 'assistant', content: cleanCode });
+      }
+
+    } catch (error: any) {
+      console.error('Image-to-code error:', error);
+      const errorMsg = error.response?.data?.error?.message || error.message || 'Unknown error';
+      this._view?.webview.postMessage({
+        type: 'error',
+        message: `Image analysis failed: ${errorMsg}`
+      });
+    } finally {
+      this._view?.webview.postMessage({ type: 'loading', isLoading: false });
+    }
+  }
+
   private determineTargetLanguage(
     currentLanguageId: string,
     instruction: string
@@ -1683,7 +1828,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data:;">
 <style>
   * { box-sizing: border-box; }
   body {
@@ -1865,6 +2010,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   .icon-btn:hover {
     background: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
+  }
+  .image-preview-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 8px;
+    margin-bottom: 4px;
+  }
+  .image-preview-bar img {
+    max-width: 80px;
+    max-height: 60px;
+    border-radius: 4px;
+    border: 1px solid var(--vscode-panel-border);
+    object-fit: cover;
+  }
+  .image-preview-bar .img-name {
+    flex: 1;
+    font-size: 12px;
+    opacity: 0.8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .image-preview-bar .img-remove {
+    cursor: pointer;
+    font-size: 16px;
+    opacity: 0.7;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .image-preview-bar .img-remove:hover {
+    opacity: 1;
+    background: var(--vscode-button-secondaryBackground);
   }
   .send-btn {
     width: 32px;
@@ -2133,8 +2314,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <span class="model-ctx" id="modelCtx"></span>
   </div>
   <div class="chat-input-wrapper">
+    <div id="imagePreview" style="display:none"></div>
     <div class="chat-input">
       <button id="addFile" class="icon-btn" title="Add file to context">+</button>
+      <button id="addImage" class="icon-btn" title="Upload UI screenshot for code generation">🖼</button>
+      <input type="file" id="imageInput" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" />
       <textarea id="input" rows="1" placeholder="Ask Prompt2Code… (use @file or @workspace)"></textarea>
       <button id="send" class="send-btn" title="Send">&#10148;</button>
     </div>
@@ -2148,6 +2332,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const clear = document.getElementById('clear');
   const attach = document.getElementById('attach');
   const addFile = document.getElementById('addFile');
+  const addImage = document.getElementById('addImage');
+  const imageInput = document.getElementById('imageInput');
+  const imagePreview = document.getElementById('imagePreview');
   const loadingBar = document.getElementById('loadingBar');
   const typingIndicator = document.getElementById('typingIndicator');
   const attachedFilesEl = document.getElementById('attachedFiles');
@@ -2157,6 +2344,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let loading = false;
   let availableModels = [];
   let currentMode = 'agent';
+
+  // ── Image attachment state ──
+  let pendingImage = null; // { base64, mimeType, fileName }
+
+  addImage.onclick = () => { imageInput.click(); };
+
+  imageInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024) {
+      alert('Image too large. Max 4 MB for the vision API.');
+      imageInput.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(',')[1];
+      const mimeType = file.type || 'image/png';
+      pendingImage = { base64, mimeType, fileName: file.name };
+      // Show preview
+      imagePreview.innerHTML =
+        '<div class="image-preview-bar">' +
+          '<img src="' + dataUrl + '" />' +
+          '<span class="img-name">' + file.name + '</span>' +
+          '<span class="img-remove" title="Remove image">&times;</span>' +
+        '</div>';
+      imagePreview.style.display = 'block';
+      imagePreview.querySelector('.img-remove').onclick = () => {
+        pendingImage = null;
+        imagePreview.innerHTML = '';
+        imagePreview.style.display = 'none';
+        imageInput.value = '';
+      };
+      // Update placeholder hint
+      input.placeholder = 'Describe what you want (or leave empty to replicate the UI)…';
+    };
+    reader.readAsDataURL(file);
+  });
 
   const modeHints = {
     ask: 'Explains code — no file edits',
@@ -2212,7 +2438,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   send.onclick = () => {
-    if (!input.value.trim() || loading) return;
+    if (loading) return;
+
+    // If an image is attached, send as image message
+    if (pendingImage) {
+      const msg = input.value.trim() || 'Recreate this UI exactly as shown in the image';
+      vscode.postMessage({
+        type: 'sendImageMessage',
+        message: msg,
+        imageBase64: pendingImage.base64,
+        mimeType: pendingImage.mimeType,
+        fileName: pendingImage.fileName
+      });
+      input.value = '';
+      pendingImage = null;
+      imagePreview.innerHTML = '';
+      imagePreview.style.display = 'none';
+      imageInput.value = '';
+      input.placeholder = 'Ask Prompt2Code\u2026 (use @file or @workspace)';
+      return;
+    }
+
+    if (!input.value.trim()) return;
     const files = trackedFiles.map(f => f.relPath);
     vscode.postMessage({ type: 'sendMessage', message: input.value, attachedFiles: files });
     input.value = '';
