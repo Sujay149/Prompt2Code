@@ -18,6 +18,7 @@
     "Snippets"
   ],
   "activationEvents": [
+    "onView:prompt2code.chatView",
     "onLanguage:html",
     "onLanguage:javascript",
     "onLanguage:typescript",
