@@ -59,6 +59,8 @@ export class GroqClient {
     'mixtral-8x7b-32768':        32_768,
     'gemma2-9b-it':              8_000,
     'meta-llama/llama-4-scout-17b-16e-instruct': 128_000,
+    'openai/gpt-oss-120b':       131_072,
+    'openai/gpt-oss-20b':        131_072,
   };
 
   /** Human-friendly model metadata for the selector UI. */
@@ -70,6 +72,8 @@ export class GroqClient {
     { id: 'llama-3.2-3b-preview',    label: 'Llama 3.2 3B',    ctx: '8K'   },
     { id: 'mixtral-8x7b-32768',      label: 'Mixtral 8x7B',    ctx: '32K'  },
     { id: 'gemma2-9b-it',            label: 'Gemma 2 9B',      ctx: '8K'   },
+    { id: 'openai/gpt-oss-120b',      label: 'OpenAI GPT-OSS 120B', ctx: '128K' },
+    { id: 'openai/gpt-oss-20b',       label: 'OpenAI GPT-OSS 20B',  ctx: '128K' },
     { id: 'meta-llama/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout (Vision)', ctx: '128K' },
   ];
 
