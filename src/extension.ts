@@ -4,6 +4,7 @@ import { GroqClient } from './groqClient';
 import { InstructionDetector, InstructionMatch } from './instructionDetector';
 import { PromptBuilder } from './promptBuilder';
 import { ChatViewProvider } from './chatViewProvider';
+import { GoogleAuthProvider } from './authProvider';
 import { createWorkspaceFile, buildProjectTree, gatherProjectContext } from './workspaceHelper';
 
 let groqClient: GroqClient;
@@ -27,12 +28,31 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register chat view provider
   const chatViewProvider = new ChatViewProvider(context.extensionUri);
+
+  // Google Auth
+  const authProvider = new GoogleAuthProvider(context);
+  chatViewProvider.setAuthProvider(authProvider);
+
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewType,
       chatViewProvider,
       { webviewOptions: { retainContextWhenHidden: true } }
     )
+  );
+
+  // Register sign-in / sign-out commands
+  context.subscriptions.push(
+    vscode.commands.registerCommand('prompt2code.signIn', async () => {
+      const user = await authProvider.signIn();
+      if (user) {
+        vscode.window.showInformationMessage(`Signed in as ${user.name}`);
+      }
+    }),
+    vscode.commands.registerCommand('prompt2code.signOut', async () => {
+      await authProvider.signOut();
+      vscode.window.showInformationMessage('Signed out of Prompt2Code');
+    })
   );
 
   // Register commands
