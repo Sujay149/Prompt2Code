@@ -52,6 +52,30 @@ export class GroqClient {
     'gemma2-9b-it':              8_000,
   };
 
+  /** Human-friendly model metadata for the selector UI. */
+  static readonly AVAILABLE_MODELS: { id: string; label: string; ctx: string }[] = [
+    { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B',   ctx: '128K' },
+    { id: 'llama-3.1-70b-versatile', label: 'Llama 3.1 70B',   ctx: '128K' },
+    { id: 'llama-3.1-8b-instant',    label: 'Llama 3.1 8B',    ctx: '8K'   },
+    { id: 'llama-3.2-1b-preview',    label: 'Llama 3.2 1B',    ctx: '8K'   },
+    { id: 'llama-3.2-3b-preview',    label: 'Llama 3.2 3B',    ctx: '8K'   },
+    { id: 'mixtral-8x7b-32768',      label: 'Mixtral 8x7B',    ctx: '32K'  },
+    { id: 'gemma2-9b-it',            label: 'Gemma 2 9B',      ctx: '8K'   },
+  ];
+
+  /** Session-level model override (set by the UI model selector). */
+  private _modelOverride: string | null = null;
+
+  /** Set a session-level model override. Pass null to revert to settings. */
+  setModelOverride(modelId: string | null): void {
+    this._modelOverride = modelId;
+  }
+
+  /** Get the currently active model (override or settings). */
+  getActiveModel(): string {
+    return this._modelOverride ?? this.getConfig().model;
+  }
+
   /** Rough chars-per-token ratio (≈ 3.5 for English code). */
   static estimateTokens(text: string): number {
     return Math.ceil(text.length / 3.5);
@@ -86,13 +110,64 @@ export class GroqClient {
 
   private getConfig() {
     const config = vscode.workspace.getConfiguration('prompt2code');
+    const model = this._modelOverride ?? config.get<string>('model', 'llama-3.3-70b-versatile');
+
+    // Resolve API key: per-model key > global fallback key
+    const perModelKeys = config.get<Record<string, string>>('apiKeys', {});
+    const globalKey = config.get<string>('apiKey', '');
+    const apiKey = perModelKeys[model] || globalKey;
+
     return {
-      apiKey: config.get<string>('apiKey', ''),
-      // Keep this aligned with package.json default.
-      model: config.get<string>('model', 'llama-3.3-70b-versatile'),
+      apiKey,
+      model,
       maxTokens: config.get<number>('maxTokens', 4096),
       temperature: config.get<number>('temperature', 0.2)
     };
+  }
+
+  /**
+   * Resolve the API key for a specific model.
+   * Checks per-model keys first, then falls back to global key.
+   */
+  getApiKeyForModel(modelId: string): string {
+    const config = vscode.workspace.getConfiguration('prompt2code');
+    const perModelKeys = config.get<Record<string, string>>('apiKeys', {});
+    return perModelKeys[modelId] || config.get<string>('apiKey', '');
+  }
+
+  /**
+   * Validate an API key by making a tiny request to Groq.
+   * Returns true if the key is valid, false otherwise.
+   */
+  async validateApiKey(apiKey: string, modelId?: string): Promise<{ valid: boolean; error?: string }> {
+    try {
+      const response = await axios.post<GroqResponse>(
+        this.baseUrl,
+        {
+          model: modelId || 'llama-3.1-8b-instant',
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 1,
+          temperature: 0,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        }
+      );
+      return { valid: !!response.data?.choices?.length };
+    } catch (error: any) {
+      const status = error.response?.status;
+      if (status === 401) {
+        return { valid: false, error: 'Invalid API key — authentication failed.' };
+      }
+      if (status === 403) {
+        return { valid: false, error: 'API key does not have permission.' };
+      }
+      return { valid: false, error: error.message || 'Validation request failed.' };
+    }
   }
 
   private async requestCompletion(
@@ -272,6 +347,141 @@ export class GroqClient {
     }
 
     return assembled.trim();
+  }
+
+  // ===========================
+  // SECTION / SELECTION EDITING
+  // ===========================
+
+  /**
+   * Edit only a selected block of code. The AI receives:
+   *  - the selected code to modify
+   *  - some surrounding context lines (read-only)
+   *  - the user instruction
+   * and outputs ONLY the replacement for the selected block.
+   */
+  async generateSectionEdit(
+    instruction: string,
+    language: string,
+    selectedCode: string,
+    surroundingContext: string,
+    onChunk: (accumulated: string) => void,
+    extraContext?: string
+  ): Promise<string> {
+    const config = this.getConfig();
+
+    if (!config.apiKey) {
+      vscode.window.showErrorMessage(
+        'Groq API key not set. Configure prompt2code.apiKey in settings.'
+      );
+      throw new Error('Missing Groq API key');
+    }
+
+    const systemPrompt = [
+      `You are an expert ${language} developer performing a SURGICAL code edit.`,
+      '',
+      'RULES (FOLLOW EXACTLY):',
+      '- You will receive a SELECTED CODE BLOCK and some SURROUNDING CONTEXT.',
+      '- Output ONLY the replacement for the SELECTED CODE BLOCK.',
+      '- Do NOT output the surrounding context — only the replacement for the selected part.',
+      '- Do NOT add markdown, code fences, or explanations.',
+      '- Maintain the same indentation level as the original selected code.',
+      '- Keep all unchanged lines within the selection exactly as they are.',
+      '- Apply ONLY what the user asked for. Do not refactor or restyle untouched code.',
+    ].join('\n');
+
+    let userPrompt = `Language: ${language}\nInstruction: ${instruction}\n\n`;
+    userPrompt += '── SURROUNDING CONTEXT (read-only, do NOT output this) ──\n';
+    userPrompt += surroundingContext;
+    userPrompt += '\n\n── SELECTED CODE (output ONLY the replacement for this block) ──\n';
+    userPrompt += selectedCode;
+    userPrompt += '\n── END OF SELECTED CODE ──\n';
+
+    if (extraContext) {
+      const budget = Math.floor(this.getContextCharBudget() * 0.3);
+      const trimmed = extraContext.length > budget
+        ? extraContext.slice(0, budget) + '\n/* ...trimmed... */\n'
+        : extraContext;
+      userPrompt += '\nAdditional project context (reference only):\n' + trimmed;
+    }
+
+    userPrompt += '\n\nOutput ONLY the replacement code for the selected block. No markdown. No explanations.';
+
+    const inputTokens = GroqClient.estimateTokens(systemPrompt + userPrompt);
+    const modelWindow = GroqClient.MODEL_WINDOWS[config.model] ?? 8_000;
+    const desiredOutput = Math.max(config.maxTokens ?? 0, 2048);
+    const roomLeft = modelWindow - inputTokens - 100;
+    const maxTokens = Math.min(desiredOutput, Math.max(roomLeft, 1500));
+
+    const body = JSON.stringify({
+      model: config.model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      max_tokens: maxTokens,
+      temperature: config.temperature,
+      stream: true
+    });
+
+    let accumulated = '';
+
+    await new Promise<void>((resolve, reject) => {
+      const url = new URL(this.baseUrl);
+      const options: https.RequestOptions = {
+        hostname: url.hostname,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream'
+        }
+      };
+
+      const req = https.request(options, (res: http.IncomingMessage) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          let errBody = '';
+          res.on('data', (d: Buffer) => { errBody += d.toString(); });
+          res.on('end', () => {
+            reject(new Error(`Groq API error (${res.statusCode}): ${errBody}`));
+          });
+          return;
+        }
+
+        let buffer = '';
+        res.on('data', (chunk: Buffer) => {
+          buffer += chunk.toString();
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) { continue; }
+            const data = trimmed.slice(6);
+            if (data === '[DONE]') { continue; }
+            try {
+              const parsed = JSON.parse(data);
+              const delta = parsed.choices?.[0]?.delta?.content;
+              if (delta) {
+                accumulated += delta;
+                onChunk(accumulated);
+              }
+            } catch { /* skip */ }
+          }
+        });
+
+        res.on('end', () => resolve());
+        res.on('error', (e: Error) => reject(e));
+      });
+
+      req.on('error', (e: Error) => reject(e));
+      req.write(body);
+      req.end();
+    });
+
+    const cleaned = this.cleanResponse(accumulated);
+    onChunk(cleaned);
+    return cleaned;
   }
 
   // ===========================
@@ -613,23 +823,35 @@ Complete the code at the cursor position.`
     const isReact = /react|jsx|tsx/i.test(language);
 
     if (isHTML && isUI) {
-      let prompt = [
-        'You are a senior front-end developer and UI/UX designer.',
-        'You produce stunning, professional, production-ready HTML pages.',
-        '',
-        'OUTPUT RULES:',
-        '- Output a COMPLETE, SINGLE HTML file with <!DOCTYPE html>, <html>, <head>, and <body>.',
-        '- ALL CSS MUST be inside a <style> tag in <head>. Do NOT use external stylesheets.',
-        '- ALL JavaScript MUST be inside a <script> tag before </body>. Do NOT use external scripts.',
-        '- Do NOT output markdown. Do NOT wrap in code fences. Output ONLY raw HTML.',
-      ].join('\n');
+      let prompt: string;
 
       if (isUpdate) {
-        prompt += '\n\nUPDATE MODE (CRITICAL):\n'
-          + '- You will receive the CURRENT FILE CONTENT. You MUST modify/update it — NOT regenerate from scratch.\n'
-          + '- Preserve all existing structure, sections, styles, and content that the user did NOT ask to change.\n'
-          + '- Apply ONLY the changes the user requested.\n'
-          + '- The output must be the COMPLETE updated file (not a diff or partial snippet).\n';
+        prompt = [
+          'You are a senior front-end developer. You are in UPDATE MODE.',
+          '',
+          'CRITICAL UPDATE RULES (HIGHEST PRIORITY):',
+          '- You will receive the CURRENT FILE CONTENT. You MUST modify/update it.',
+          '- Do NOT regenerate the file from scratch.',
+          '- Preserve ALL existing sections, styles, scripts, and content the user did NOT mention.',
+          '- Apply ONLY the specific changes the user requested.',
+          '- Output the COMPLETE updated file with your changes applied.',
+          '',
+          'OUTPUT RULES:',
+          '- Output a COMPLETE HTML file (<!DOCTYPE html> to </html>).',
+          '- ALL CSS inside <style>, ALL JS inside <script>.',
+          '- No markdown. No code fences. Output ONLY raw HTML.',
+        ].join('\n');
+      } else {
+        prompt = [
+          'You are a senior front-end developer and UI/UX designer.',
+          'You produce stunning, professional, production-ready HTML pages.',
+          '',
+          'OUTPUT RULES:',
+          '- Output a COMPLETE, SINGLE HTML file with <!DOCTYPE html>, <html>, <head>, and <body>.',
+          '- ALL CSS MUST be inside a <style> tag in <head>. Do NOT use external stylesheets.',
+          '- ALL JavaScript MUST be inside a <script> tag before </body>. Do NOT use external scripts.',
+          '- Do NOT output markdown. Do NOT wrap in code fences. Output ONLY raw HTML.',
+        ].join('\n');
       }
 
       prompt += '\n' + [
@@ -658,21 +880,41 @@ Complete the code at the cursor position.`
     }
 
     if (isCSS && isUI) {
-      let prompt = [
+      if (isUpdate) {
+        return [
+          'You are a senior CSS/UI designer. You are in UPDATE MODE.',
+          '',
+          'CRITICAL: Modify/update the CURRENT FILE CONTENT — do NOT regenerate from scratch.',
+          'Preserve all existing styles the user did NOT ask to change.',
+          'Apply ONLY the requested changes. Output the COMPLETE updated file.',
+          '',
+          'Use CSS Grid/Flexbox, custom properties, media queries, transitions, and shadows.',
+          'Output ONLY valid CSS. No markdown. No explanations.',
+        ].join('\n');
+      }
+      return [
         'You are a senior CSS/UI designer.',
         'Write modern, responsive, professional CSS.',
         'Use CSS Grid/Flexbox, custom properties, media queries, transitions, and shadows.',
         'Create visually polished, production-quality styles.',
         'Output ONLY valid CSS. No markdown. No explanations.',
       ].join('\n');
-      if (isUpdate) {
-        prompt += '\n\nUPDATE MODE: You will receive the CURRENT FILE CONTENT. Modify/update it — do NOT regenerate from scratch. Preserve everything the user did NOT ask to change. Output the COMPLETE updated file.\n';
-      }
-      return prompt;
     }
 
     if (isReact && isUI) {
-      let prompt = [
+      if (isUpdate) {
+        return [
+          'You are a senior React developer. You are in UPDATE MODE.',
+          '',
+          'CRITICAL: Modify/update the CURRENT FILE CONTENT — do NOT regenerate from scratch.',
+          'Preserve all existing components, hooks, state, and styles the user did NOT ask to change.',
+          'Apply ONLY the requested changes. Output the COMPLETE updated file.',
+          '',
+          'Use functional components with hooks. Professional responsive UI.',
+          'Output ONLY valid JSX/TSX code. No markdown. No explanations.',
+        ].join('\n');
+      }
+      return [
         'You are a senior React developer and UI/UX designer.',
         'Generate a professional, responsive React component with inline styles or a <style> tag.',
         'Use functional components with hooks.',
@@ -681,14 +923,26 @@ Complete the code at the cursor position.`
         'For images use https://picsum.photos/ placeholder URLs.',
         'Output ONLY valid JSX/TSX code. No markdown. No explanations.',
       ].join('\n');
-      if (isUpdate) {
-        prompt += '\n\nUPDATE MODE: You will receive the CURRENT FILE CONTENT. Modify/update it — do NOT regenerate from scratch. Preserve everything the user did NOT ask to change. Output the COMPLETE updated file.\n';
-      }
-      return prompt;
     }
 
     // Default for non-UI or other languages
-    let prompt = [
+    if (isUpdate) {
+      return [
+        `You are an expert ${language} developer. You are in UPDATE MODE.`,
+        '',
+        'CRITICAL UPDATE RULES (HIGHEST PRIORITY):',
+        '- You will receive the CURRENT FILE CONTENT. You MUST modify/update it.',
+        '- Do NOT regenerate the file from scratch.',
+        '- Preserve ALL existing code, functions, logic, and structure the user did NOT mention.',
+        '- Apply ONLY the specific changes the user requested.',
+        '- Output the COMPLETE updated file with your changes applied.',
+        '',
+        'Match existing code style, naming conventions, and patterns.',
+        'Use the same libraries and imports already present.',
+        'Output ONLY valid code. No markdown. No explanations.',
+      ].join('\n');
+    }
+    return [
       `You are an expert ${language} developer.`,
       'Generate clean, well-structured, responsive, production-ready code following industry best practices.',
       'You will receive existing project files as context — study them carefully and:',
@@ -698,14 +952,6 @@ Complete the code at the cursor position.`
       '- Reuse existing utility functions or components when possible.',
       'Output ONLY valid code. No markdown. No explanations.',
     ].join('\n');
-    if (isUpdate) {
-      prompt += '\n\nUPDATE MODE (CRITICAL):\n'
-        + '- You will receive the CURRENT FILE CONTENT. You MUST modify/update it — NOT regenerate from scratch.\n'
-        + '- Preserve all existing code, logic, functions, and structure that the user did NOT ask to change.\n'
-        + '- Apply ONLY the changes the user requested.\n'
-        + '- The output must be the COMPLETE updated file (not a diff or partial snippet).\n';
-    }
-    return prompt;
   }
 
   private buildUserPrompt(
@@ -784,12 +1030,14 @@ Complete the code at the cursor position.`
         ? currentFileContent.slice(0, fileBudget) + '\n/* ...file truncated to fit model limits... */\n'
         : currentFileContent;
 
-      prompt += '\n\n========== CURRENT FILE CONTENT (MODIFY THIS) ==========\n'
-        + 'Below is the CURRENT content of the file you are editing.\n'
-        + 'Apply the user\'s instruction to UPDATE this code.\n'
-        + 'Do NOT regenerate from scratch — preserve everything the user did NOT ask to change.\n'
-        + 'Output the COMPLETE updated file.\n'
-        + '=========================================================\n\n';
+      prompt += '\n\n========== CURRENT FILE CONTENT (MODIFY THIS — DO NOT REWRITE FROM SCRATCH) ==========\n'
+        + 'The code below is the EXISTING file in the editor. Your job is to UPDATE it.\n'
+        + 'RULES:\n'
+        + '1. Read the user\'s instruction and apply ONLY those changes.\n'
+        + '2. Keep ALL existing code, structure, and content that was NOT mentioned by the user.\n'
+        + '3. Output the COMPLETE file with your modifications applied (not a diff or snippet).\n'
+        + '4. Do NOT start a brand new file. Do NOT delete sections the user did not ask to remove.\n'
+        + '======================================================================================\n\n';
       prompt += trimmedFile;
       prompt += '\n\n========== END OF CURRENT FILE ==========\n';
 

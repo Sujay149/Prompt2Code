@@ -1,7 +1,7 @@
 {
   "name": "prompt2code",
   "displayName": "Prompt2Code",
-  "description": "Prompt-driven code generation and inline completions inside VS Code (powered by Groq)",
+  "description": "Prompt-driven code generation and inline completions inside VS Code ",
   "version": "1.0.1",
   "publisher": "SujayBabuThota",
   "repository": {

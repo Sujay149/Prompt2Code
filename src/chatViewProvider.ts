@@ -57,6 +57,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.getHtml(webviewView.webview);
 
+    // Send available models + current selection to webview
+    this.sendModelListToWebview();
+
     webviewView.webview.onDidReceiveMessage(async (data) => {
       console.log('Webview → Extension:', data);
 
@@ -119,6 +122,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.checkpoints.delete(data.id);
           break;
         }
+
+        case 'selectModel': {
+          await this.handleModelSelection(data.modelId);
+          break;
+        }
       }
     });
   }
@@ -141,6 +149,159 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       relPath,
       languageId: doc.languageId,
     });
+  }
+
+  /** Send available model list and currently active model to webview. */
+  private sendModelListToWebview() {
+    if (!this._view) { return; }
+    const models = GroqClient.AVAILABLE_MODELS;
+    const activeModel = this.groqClient.getActiveModel();
+    this._view.webview.postMessage({
+      type: 'modelList',
+      models,
+      activeModel,
+    });
+  }
+
+  /** Handle model selection from the webview dropdown. */
+  private async handleModelSelection(modelId: string) {
+    const modelInfo = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId);
+    const modelLabel = modelInfo?.label ?? modelId;
+
+    // Check if this specific model already has a key (per-model or global fallback)
+    let apiKey = this.groqClient.getApiKeyForModel(modelId);
+
+    if (!apiKey || apiKey.trim() === '') {
+      // First time using this model — prompt for its API key
+      const enteredKey = await vscode.window.showInputBox({
+        title: `API Key for ${modelLabel}`,
+        prompt: `Enter your Groq API key to use ${modelLabel}. Get one free at https://console.groq.com`,
+        placeHolder: 'gsk_...',
+        password: true,
+        ignoreFocusOut: true,
+      });
+
+      if (!enteredKey || !enteredKey.trim()) {
+        this._view?.webview.postMessage({
+          type: 'modelChangeResult',
+          success: false,
+          error: 'No API key provided.',
+          activeModel: this.groqClient.getActiveModel(),
+        });
+        return;
+      }
+
+      // Validate the key against this specific model
+      this._view?.webview.postMessage({
+        type: 'assistantMessage',
+        message: `🔑 Validating API key for ${modelLabel}…`,
+      });
+
+      const validation = await this.groqClient.validateApiKey(enteredKey.trim(), modelId);
+      if (!validation.valid) {
+        this._view?.webview.postMessage({
+          type: 'modelChangeResult',
+          success: false,
+          error: validation.error || 'Invalid API key.',
+          activeModel: this.groqClient.getActiveModel(),
+        });
+        vscode.window.showErrorMessage(`Invalid API key: ${validation.error}`);
+        return;
+      }
+
+      // Save the validated key for this model
+      const config = vscode.workspace.getConfiguration('prompt2code');
+      const perModelKeys = { ...config.get<Record<string, string>>('apiKeys', {}) };
+      perModelKeys[modelId] = enteredKey.trim();
+      await config.update('apiKeys', perModelKeys, vscode.ConfigurationTarget.Global);
+      apiKey = enteredKey.trim();
+
+      this._view?.webview.postMessage({
+        type: 'assistantMessage',
+        message: `✅ API key for ${modelLabel} validated and saved.`,
+      });
+    }
+
+    // Set the model override
+    this.groqClient.setModelOverride(modelId);
+
+    // Also persist it to settings so it survives reloads
+    await vscode.workspace.getConfiguration('prompt2code').update('model', modelId, vscode.ConfigurationTarget.Global);
+
+    this._view?.webview.postMessage({
+      type: 'modelChangeResult',
+      success: true,
+      activeModel: modelId,
+    });
+
+    vscode.window.showInformationMessage(`Model switched to ${modelLabel}`);
+  }
+
+  /**
+   * Compute a human-readable diff summary between the old and new content.
+   * Returns a structured message showing what changed.
+   */
+  private computeDiffSummary(oldContent: string, newContent: string, fileName: string): string {
+    const oldLines = oldContent.split('\n');
+    const newLines = newContent.split('\n');
+
+    let added = 0;
+    let removed = 0;
+    const changedSections: string[] = [];
+
+    // Simple line-level diff via LCS-like approach
+    const oldSet = new Set(oldLines.map(l => l.trim()).filter(Boolean));
+    const newSet = new Set(newLines.map(l => l.trim()).filter(Boolean));
+
+    for (const line of newLines) {
+      if (line.trim() && !oldSet.has(line.trim())) { added++; }
+    }
+    for (const line of oldLines) {
+      if (line.trim() && !newSet.has(line.trim())) { removed++; }
+    }
+
+    // Identify changed regions (up to 5)
+    let regionStart = -1;
+    const maxRegions = 5;
+    for (let i = 0; i < Math.max(oldLines.length, newLines.length); i++) {
+      const oldL = (oldLines[i] ?? '').trim();
+      const newL = (newLines[i] ?? '').trim();
+      if (oldL !== newL) {
+        if (regionStart < 0) { regionStart = i; }
+      } else if (regionStart >= 0) {
+        if (changedSections.length < maxRegions) {
+          const span = i - regionStart;
+          changedSections.push(`  • Lines ${regionStart + 1}–${i} (${span} line${span !== 1 ? 's' : ''})`);
+        }
+        regionStart = -1;
+      }
+    }
+    if (regionStart >= 0 && changedSections.length < maxRegions) {
+      const endLine = Math.max(oldLines.length, newLines.length);
+      const span = endLine - regionStart;
+      changedSections.push(`  • Lines ${regionStart + 1}–${endLine} (${span} line${span !== 1 ? 's' : ''})`);
+    }
+
+    const sizeDelta = newLines.length - oldLines.length;
+    const sizeNote = sizeDelta === 0
+      ? `${newLines.length} lines (unchanged size)`
+      : sizeDelta > 0
+        ? `${oldLines.length} → ${newLines.length} lines (+${sizeDelta})`
+        : `${oldLines.length} → ${newLines.length} lines (${sizeDelta})`;
+
+    let summary = `📋 Changes made to ${fileName}:\n`;
+    summary += `───────────────────────────\n`;
+    summary += `  ✚ ${added} line${added !== 1 ? 's' : ''} added\n`;
+    summary += `  ─ ${removed} line${removed !== 1 ? 's' : ''} removed\n`;
+    summary += `  📏 ${sizeNote}\n`;
+    if (changedSections.length > 0) {
+      summary += `\n📍 Changed regions:\n`;
+      summary += changedSections.join('\n');
+      if (changedSections.length === maxRegions) {
+        summary += '\n  … and more';
+      }
+    }
+    return summary;
   }
 
   // ===========================
@@ -168,12 +329,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
 
     try {
-      // ⚠️ CHECK API KEY FIRST
-      const apiKey = vscode.workspace.getConfiguration('prompt2code').get<string>('apiKey', '');
-      console.log('🔑 API Key configured:', apiKey ? 'YES' : 'NO');
+      // ⚠️ CHECK API KEY FIRST — resolves per-model key or global fallback
+      const activeModel = this.groqClient.getActiveModel();
+      const apiKey = this.groqClient.getApiKeyForModel(activeModel);
+      console.log('🔑 API Key for', activeModel, ':', apiKey ? 'YES' : 'NO');
 
       if (!apiKey || apiKey.trim() === '') {
-        throw new Error('⚠️ Groq API key not configured. Please set it in Settings → Prompt2Code: Api Key\n\nGet your free API key at: https://console.groq.com');
+        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
+        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown below to set its key.\n\nGet your free API key at: https://console.groq.com`);
       }
 
       // ── Resolve @file / #file: references ──
@@ -217,14 +380,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         const target = this.determineTargetLanguage(doc.languageId, cleanMessage);
 
-        // Build context: current file + referenced files + auto-scanned project files
+        // Build context: referenced files + auto-scanned project files
         const contextParts: string[] = [];
         if (referencedFilesContext) { contextParts.push(referencedFilesContext); }
-        const baseCtx = await this.buildCodebaseContext(doc, { targetLanguageId: target.languageId, instruction: cleanMessage }, true);
-        contextParts.push(baseCtx);
 
-        // Auto-scan: gather same-language project files, configs, open tabs
-        // Budget is driven by the model's token window
         const ctxCharBudget = this.groqClient.getContextCharBudget();
         const projectCtx = await gatherProjectContext({
           languageId: target.languageId || doc.languageId,
@@ -234,36 +393,151 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
         if (projectCtx.text) { contextParts.push(projectCtx.text); }
 
-        // Show "working" status in chat
-        this._view?.webview.postMessage({
-          type: 'assistantMessage',
-          message: '⏳ Generating code — watch the editor for live changes…'
-        });
-
         // 💾 Save checkpoint before modifying the editor
         const cpId = String(++this.checkpointCounter);
         this.checkpoints.set(cpId, { uri: doc.uri, content: doc.getText() });
-
-        // Link this checkpoint to the last user message so the restore button works
         this._view?.webview.postMessage({ type: 'linkCheckpoint', checkpointId: cpId });
 
-        // Capture the current file content for UPDATE mode —
-        // the AI will modify this rather than regenerating from scratch.
-        const currentFileContent = doc.getText();
+        // ── Determine editing strategy: SELECTION vs WHOLE-FILE ──
+        const selection = editor.selection;
+        const hasSelection = !selection.isEmpty;
+        const fileLineCount = doc.lineCount;
 
-        // Stream code directly into the editor
-        const updater = this.makeStreamUpdater(editor, 200);
-        const newCode = await this.groqClient.generateCodeStreaming(
-          cleanMessage,
-          target.promptLanguage,
-          updater.onChunk,
-          contextParts.join('\n\n'),
-          currentFileContent // ← tells the AI to UPDATE, not regenerate
-        );
+        if (hasSelection) {
+          // ═══════ SELECTION MODE: edit only the selected block ═══════
+          console.log('📌 Selection mode — editing lines', selection.start.line + 1, 'to', selection.end.line + 1);
 
-        // Wait for any in-flight edit, then do the final write
-        await updater.flush();
-        await this.replaceFullDocument(editor, newCode, 5);
+          const selectedText = doc.getText(selection);
+
+          // Grab surrounding context (up to 20 lines before/after)
+          const ctxLinesBefore = 20;
+          const ctxLinesAfter = 20;
+          const beforeStart = Math.max(0, selection.start.line - ctxLinesBefore);
+          const afterEnd = Math.min(fileLineCount - 1, selection.end.line + ctxLinesAfter);
+
+          const beforeRange = new vscode.Range(beforeStart, 0, selection.start.line, 0);
+          const afterRange = new vscode.Range(selection.end.line + 1, 0, afterEnd + 1, 0);
+
+          const beforeText = doc.getText(beforeRange);
+          const afterText = doc.getText(afterRange);
+
+          const surroundingCtx =
+            `── Lines BEFORE selection (read-only) ──\n${beforeText}\n` +
+            `── Lines AFTER selection (read-only) ──\n${afterText}`;
+
+          this._view?.webview.postMessage({
+            type: 'assistantMessage',
+            message: `⏳ Editing selected code (lines ${selection.start.line + 1}–${selection.end.line + 1})…`
+          });
+
+          // Use the range stream updater — only replaces the selection
+          const startOffset = doc.offsetAt(selection.start);
+          const originalLen = selectedText.length;
+          const updater = this.makeRangeStreamUpdater(editor, startOffset, originalLen, 150);
+
+          const newBlock = await this.groqClient.generateSectionEdit(
+            cleanMessage,
+            target.promptLanguage,
+            selectedText,
+            surroundingCtx,
+            updater.onChunk,
+            contextParts.join('\n\n')
+          );
+
+          await updater.flush();
+
+          // Final write: ensure the exact replacement landed correctly
+          // The updater tracks the current range, but do a safety pass to guarantee correctness
+          const docAfter = editor.document;
+          const textNow = docAfter.getText();
+          const before = textNow.substring(0, startOffset);
+          const after = textNow.substring(startOffset);
+          // The streamed region starts at startOffset — find what's currently there
+          // and replace with the final accumulated newBlock if it doesn't match.
+          if (!after.startsWith(newBlock)) {
+            // Determine end of the region the updater was writing into
+            const currentRegionLen = textNow.length - (doc.getText().length - originalLen - startOffset > 0
+              ? doc.getText().length - originalLen
+              : textNow.length - newBlock.length);
+            // Simplest approach: just replace from startOffset to startOffset + whatever the updater wrote
+            const safeEnd = Math.min(textNow.length, startOffset + Math.max(newBlock.length, originalLen));
+            await this.replaceRange(
+              editor,
+              new vscode.Range(docAfter.positionAt(startOffset), docAfter.positionAt(safeEnd)),
+              newBlock,
+              3
+            );
+          }
+
+        } else if (fileLineCount > 80) {
+          // ═══════ SMART WHOLE-FILE MODE for large files ═══════
+          // Auto-detect the relevant section and edit only that
+          console.log('📝 Smart whole-file mode — file has', fileLineCount, 'lines');
+
+          // Try to find the relevant section based on the instruction keywords
+          const fullText = doc.getText();
+          const lines = fullText.split('\n');
+          const relevantRange = this.findRelevantSection(lines, cleanMessage);
+
+          if (relevantRange) {
+            console.log('📌 Auto-detected relevant section: lines', relevantRange.start + 1, 'to', relevantRange.end + 1);
+
+            const sectionLines = lines.slice(relevantRange.start, relevantRange.end + 1);
+            const selectedText = sectionLines.join('\n');
+
+            // Context: lines around the section
+            const beforeLines = lines.slice(Math.max(0, relevantRange.start - 15), relevantRange.start);
+            const afterLines = lines.slice(relevantRange.end + 1, Math.min(lines.length, relevantRange.end + 16));
+
+            const surroundingCtx =
+              `── Lines BEFORE section (read-only) ──\n${beforeLines.join('\n')}\n` +
+              `── Lines AFTER section (read-only) ──\n${afterLines.join('\n')}`;
+
+            this._view?.webview.postMessage({
+              type: 'assistantMessage',
+              message: `⏳ Editing lines ${relevantRange.start + 1}–${relevantRange.end + 1}…`
+            });
+
+            const startPos = doc.lineAt(relevantRange.start).range.start;
+            const endPos = doc.lineAt(relevantRange.end).range.end;
+            const startOffset = doc.offsetAt(startPos);
+            const originalLen = doc.offsetAt(endPos) - startOffset;
+            const updater = this.makeRangeStreamUpdater(editor, startOffset, originalLen, 150);
+
+            const newBlock = await this.groqClient.generateSectionEdit(
+              cleanMessage,
+              target.promptLanguage,
+              selectedText,
+              surroundingCtx,
+              updater.onChunk,
+              contextParts.join('\n\n')
+            );
+
+            await updater.flush();
+            // Final safety write — ensure the section was replaced correctly
+            const curDoc = editor.document;
+            const curText = curDoc.getText();
+            const curAfter = curText.substring(startOffset);
+            if (!curAfter.startsWith(newBlock)) {
+              const safeEnd = Math.min(curText.length, startOffset + Math.max(newBlock.length, originalLen));
+              await this.replaceRange(
+                editor,
+                new vscode.Range(curDoc.positionAt(startOffset), curDoc.positionAt(safeEnd)),
+                newBlock,
+                3
+              );
+            }
+          } else {
+            // Couldn't detect section — fall back to whole-file update
+            console.log('📝 Falling back to whole-file update mode');
+            await this.doWholeFileUpdate(editor, doc, cleanMessage, target, contextParts);
+          }
+
+        } else {
+          // ═══════ SMALL FILE: whole-file update (original behavior) ═══════
+          console.log('📝 Whole-file update mode — file has', fileLineCount, 'lines');
+          await this.doWholeFileUpdate(editor, doc, cleanMessage, target, contextParts);
+        }
 
         // If user asked for React while editing HTML, switch language mode for better UX.
         if (target.languageId && target.languageId !== doc.languageId) {
@@ -275,9 +549,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         vscode.window.showInformationMessage('Code updated in editor');
 
+        // 📋 Compute and display diff summary
+        const checkpointContent = this.checkpoints.get(cpId)?.content ?? '';
+        const updatedContent = editor.document.getText();
+        const fileName = path.basename(editor.document.uri.fsPath);
+        const diffSummary = this.computeDiffSummary(checkpointContent, updatedContent, fileName);
+
         this._view?.webview.postMessage({
           type: 'assistantMessage',
-          message: '✅ Code updated in editor.'
+          message: `✅ Code updated in editor.\n\n${diffSummary}`
         });
 
         // Show Keep / Undo checkpoint banner
@@ -670,6 +950,81 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Replace a specific line range in the document (used for selection-based edits).
+   */
+  private async replaceRange(
+    editor: vscode.TextEditor,
+    range: vscode.Range,
+    newText: string,
+    retries = 3
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const ok = await editor.edit(
+          (eb) => { eb.replace(range, newText); },
+          { undoStopBefore: false, undoStopAfter: false }
+        );
+        if (ok) { return true; }
+      } catch {
+        // editor busy
+      }
+      await new Promise(r => setTimeout(r, 120));
+    }
+    return false;
+  }
+
+  /**
+   * Stream updater that replaces only a specific range (for selection edits).
+   * The range is tracked and updated as the content changes length.
+   */
+  private makeRangeStreamUpdater(
+    editor: vscode.TextEditor,
+    startOffset: number,
+    originalLength: number,
+    minChars = 200
+  ): { onChunk: (accumulated: string) => void; flush: () => Promise<void> } {
+    let pending: string | null = null;
+    let lastLen = 0;
+    let busy = false;
+    let currentEnd = startOffset + originalLength;
+
+    const apply = async () => {
+      if (busy || pending === null) { return; }
+      busy = true;
+      const text = pending;
+      pending = null;
+      try {
+        const doc = editor.document;
+        const range = new vscode.Range(
+          doc.positionAt(startOffset),
+          doc.positionAt(currentEnd)
+        );
+        const ok = await editor.edit(
+          (eb) => { eb.replace(range, text); },
+          { undoStopBefore: false, undoStopAfter: false }
+        );
+        if (ok) {
+          currentEnd = startOffset + text.length;
+        }
+      } catch { /* editor busy */ }
+      busy = false;
+      if (pending !== null) { apply(); }
+    };
+
+    return {
+      onChunk(accumulated: string) {
+        if (accumulated.length - lastLen < minChars) { return; }
+        lastLen = accumulated.length;
+        pending = accumulated;
+        apply();
+      },
+      async flush() {
+        while (busy) { await new Promise(r => setTimeout(r, 80)); }
+      }
+    };
+  }
+
+  /**
    * Helper: creates a serialised queue so only one editor.edit()
    * is in-flight at a time. Returns a callback suitable for the
    * streaming `onChunk` parameter.
@@ -705,6 +1060,145 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         while (busy) { await new Promise(r => setTimeout(r, 80)); }
       }
     };
+  }
+
+  // ===========================
+  // SECTION DETECTION
+  // ===========================
+
+  /**
+   * Heuristic: scan the file for a code block that is likely relevant
+   * to the user's instruction. Returns a { start, end } line-range (0-indexed)
+   * or null if nothing meaningful was found.
+   */
+  private findRelevantSection(
+    lines: string[],
+    instruction: string
+  ): { start: number; end: number } | null {
+    const lower = instruction.toLowerCase();
+
+    // Extract potential identifiers the user mentioned (function/class/variable names)
+    const identifiers = lower.match(/\b[a-z_$][a-z0-9_$]*\b/gi) || [];
+    // Remove common stop-words so we only search meaningful identifiers
+    const stopWords = new Set([
+      'the', 'a', 'an', 'is', 'it', 'to', 'in', 'on', 'of', 'for', 'and', 'or',
+      'this', 'that', 'add', 'change', 'update', 'modify', 'remove', 'fix', 'make',
+      'new', 'with', 'from', 'into', 'can', 'should', 'not', 'dont', 'please',
+      'create', 'use', 'using', 'want', 'need', 'code', 'function', 'class', 'method',
+      'style', 'color', 'text', 'background', 'css', 'html', 'javascript', 'typescript',
+      'react', 'component', 'button', 'input', 'form', 'div', 'section', 'header',
+      'footer', 'nav', 'sidebar', 'modal', 'dropdown'
+    ]);
+    const keywords = identifiers.filter(w => !stopWords.has(w.toLowerCase()) && w.length > 2);
+
+    // Try to find a block containing one of the keywords
+    let bestStart = -1;
+    let bestScore = 0;
+
+    // Also look for common HTML/CSS/JS section names in the instruction
+    const sectionPatterns: RegExp[] = [];
+    if (/\bnav(bar|igation)?\b/i.test(lower)) { sectionPatterns.push(/\bnav/i); }
+    if (/\bheader\b/i.test(lower)) { sectionPatterns.push(/\bheader/i); }
+    if (/\bfooter\b/i.test(lower)) { sectionPatterns.push(/\bfooter/i); }
+    if (/\bsidebar\b/i.test(lower)) { sectionPatterns.push(/\bsidebar/i); }
+    if (/\bmodal\b/i.test(lower)) { sectionPatterns.push(/\bmodal/i); }
+    if (/\bhero\b/i.test(lower)) { sectionPatterns.push(/\bhero/i); }
+    if (/\bcard\b/i.test(lower)) { sectionPatterns.push(/\bcard/i); }
+    if (/\btable\b/i.test(lower)) { sectionPatterns.push(/\btable/i); }
+    if (/\bform\b/i.test(lower)) { sectionPatterns.push(/\bform/i); }
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      let lineScore = 0;
+
+      for (const kw of keywords) {
+        if (line.toLowerCase().includes(kw.toLowerCase())) { lineScore += 2; }
+      }
+      for (const pat of sectionPatterns) {
+        if (pat.test(line)) { lineScore += 3; }
+      }
+
+      if (lineScore > bestScore) {
+        bestScore = lineScore;
+        bestStart = i;
+      }
+    }
+
+    if (bestStart < 0 || bestScore < 2) { return null; }
+
+    // Expand from anchor line to enclosing block
+    // Walk backward to find block start
+    let start = bestStart;
+    let depth = 0;
+    for (let i = bestStart; i >= 0; i--) {
+      const line = lines[i];
+      depth += (line.match(/[{}]/g) || []).reduce((d: number, ch: string) => d + (ch === '}' ? 1 : -1), 0);
+      if (depth <= 0 && i < bestStart) {
+        // Found a line at the same or outer nesting level — this might be the block start
+        if (/^\s*(function|class|const|let|var|export|import|<\w|\/\*|\/\/|\.[\w-]+\s*\{|#[\w-]+|@media|@keyframes)/.test(line.trim()) || line.trim() === '') {
+          start = i;
+          break;
+        }
+      }
+      start = i;
+    }
+
+    // Walk forward to find block end
+    let end = bestStart;
+    depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      for (const ch of lines[i]) {
+        if (ch === '{' || ch === '(' || ch === '<') { depth++; }
+        if (ch === '}' || ch === ')' || ch === '>') { depth--; }
+      }
+      end = i;
+      if (depth <= 0 && i > bestStart) { break; }
+      // Also cap at a reasonable size (max ~60 lines from anchor)
+      if (i - start > 60) { break; }
+    }
+
+    // Ensure minimum context
+    if (end - start < 3) {
+      start = Math.max(0, bestStart - 5);
+      end = Math.min(lines.length - 1, bestStart + 15);
+    }
+
+    return { start, end };
+  }
+
+  // ===========================
+  // WHOLE-FILE UPDATE (extracted helper)
+  // ===========================
+
+  private async doWholeFileUpdate(
+    editor: vscode.TextEditor,
+    doc: vscode.TextDocument,
+    cleanMessage: string,
+    target: { languageId?: string; promptLanguage: string },
+    contextParts: string[]
+  ) {
+    const currentFileContent = doc.getText();
+
+    const baseCtx = await this.buildCodebaseContext(doc, { targetLanguageId: target.languageId, instruction: cleanMessage }, true);
+    contextParts.push(baseCtx);
+
+    this._view?.webview.postMessage({
+      type: 'assistantMessage',
+      message: '⏳ Generating code — watch the editor for live changes…'
+    });
+
+    // Stream code directly into the editor
+    const updater = this.makeStreamUpdater(editor, 200);
+    const newCode = await this.groqClient.generateCodeStreaming(
+      cleanMessage,
+      target.promptLanguage,
+      updater.onChunk,
+      contextParts.join('\n\n'),
+      currentFileContent
+    );
+
+    await updater.flush();
+    await this.replaceFullDocument(editor, newCode, 5);
   }
 
   // ===========================
@@ -1046,6 +1540,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     line-height: 1;
   }
   .file-chip .remove:hover { opacity: 1; }
+  /* ── Model selector ── */
+  .model-selector-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-top: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-sideBar-background);
+  }
+  .model-selector-bar label {
+    font-size: 11px;
+    opacity: 0.7;
+    white-space: nowrap;
+  }
+  .model-selector-bar select {
+    flex: 1;
+    min-width: 0;
+    padding: 3px 6px;
+    font-size: 11px;
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+    background: var(--vscode-dropdown-background, var(--vscode-input-background));
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+    border-radius: 4px;
+    outline: none;
+    cursor: pointer;
+    appearance: auto;
+  }
+  .model-selector-bar select:focus {
+    border-color: var(--vscode-focusBorder);
+  }
+  .model-selector-bar .model-ctx {
+    font-size: 10px;
+    opacity: 0.5;
+    white-space: nowrap;
+  }
+  /* ── Diff summary styling in bubble ── */
+  .bubble .diff-summary {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12px;
+    line-height: 1.6;
+  }
 </style>
 </head>
 
@@ -1070,6 +1606,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   <div class="typing" id="typingIndicator">⏳ Working… generating code in the editor</div>
   <div class="attached-files" id="attachedFiles"></div>
+  <div class="model-selector-bar">
+    <label>Model:</label>
+    <select id="modelSelect"><option>Loading…</option></select>
+    <span class="model-ctx" id="modelCtx"></span>
+  </div>
   <div class="chat-input-wrapper">
     <div class="chat-input">
       <button id="addFile" class="icon-btn" title="Add file to context">+</button>
@@ -1089,8 +1630,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const loadingBar = document.getElementById('loadingBar');
   const typingIndicator = document.getElementById('typingIndicator');
   const attachedFilesEl = document.getElementById('attachedFiles');
+  const modelSelect = document.getElementById('modelSelect');
+  const modelCtx = document.getElementById('modelCtx');
 
   let loading = false;
+  let availableModels = [];
 
   // ── Tracked / attached files state ──
   // { relPath, fileName, languageId, source: 'active'|'manual' }
@@ -1132,6 +1676,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   addFile.onclick = () => {
     vscode.postMessage({ type: 'pickFile' });
+  };
+
+  // Model selector
+  modelSelect.onchange = () => {
+    const selectedId = modelSelect.value;
+    vscode.postMessage({ type: 'selectModel', modelId: selectedId });
   };
 
   // Auto-grow textarea (Copilot-like)
@@ -1199,6 +1749,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
       }
       renderChips();
+    }
+    if (msg.type === 'modelList') {
+      availableModels = msg.models || [];
+      modelSelect.innerHTML = '';
+      for (const m of availableModels) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label + ' (' + m.ctx + ')';
+        if (m.id === msg.activeModel) { opt.selected = true; }
+        modelSelect.appendChild(opt);
+      }
+      // Show ctx window for the current model
+      const cur = availableModels.find(m => m.id === msg.activeModel);
+      modelCtx.textContent = cur ? cur.ctx + ' context' : '';
+    }
+    if (msg.type === 'modelChangeResult') {
+      if (msg.success) {
+        modelSelect.value = msg.activeModel;
+        const cur = availableModels.find(m => m.id === msg.activeModel);
+        modelCtx.textContent = cur ? cur.ctx + ' context' : '';
+      } else {
+        // Revert the dropdown to the active model
+        const cur = availableModels.find(m => m.id === msg.activeModel);
+        if (cur) { modelSelect.value = cur.id; }
+        if (msg.error) {
+          add('Error', msg.error, 'assistant');
+        }
+      }
     }
   });
 

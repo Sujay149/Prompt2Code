@@ -82,7 +82,13 @@
         "prompt2code.apiKey": {
           "type": "string",
           "default": "",
-          "description": "Your Groq API key",
+          "description": "Default Groq API key (used as fallback when no per-model key is set)",
+          "order": 1
+        },
+        "prompt2code.apiKeys": {
+          "type": "object",
+          "default": {},
+          "description": "Per-model API keys. Each model you select will ask for its own key on first use.",
           "order": 1
         },
         "prompt2code.model": {
@@ -90,12 +96,23 @@
           "default": "llama-3.3-70b-versatile",
           "enum": [
             "llama-3.3-70b-versatile",
+            "llama-3.1-70b-versatile",
             "llama-3.1-8b-instant",
+            "llama-3.2-1b-preview",
+            "llama-3.2-3b-preview",
             "mixtral-8x7b-32768",
-            "llama3-groq-70b-8192-tool-use-preview",
-            "llama3-groq-8b-8192-tool-use-preview"
+            "gemma2-9b-it"
           ],
-          "description": "Groq model to use",
+          "enumDescriptions": [
+            "Llama 3.3 70B (128K context) — Best quality",
+            "Llama 3.1 70B (128K context)",
+            "Llama 3.1 8B (8K context) — Fast",
+            "Llama 3.2 1B (8K context) — Lightweight",
+            "Llama 3.2 3B (8K context) — Lightweight",
+            "Mixtral 8x7B (32K context)",
+            "Gemma 2 9B (8K context)"
+          ],
+          "description": "Groq model to use (also selectable from the chat panel)",
           "order": 2
         },
         "prompt2code.maxTokens": {
