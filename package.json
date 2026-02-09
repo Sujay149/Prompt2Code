@@ -2,7 +2,7 @@
   "name": "prompt2code",
   "displayName": "Prompt2Code",
   "description": "Prompt-driven code generation and inline completions inside VS Code",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "publisher": "SujayBabuThota",
   "repository": {
     "type": "git",
@@ -18,7 +18,6 @@
     "Snippets"
   ],
   "activationEvents": [
-    "onView:prompt2code.chatView",
     "onLanguage:html",
     "onLanguage:javascript",
     "onLanguage:typescript",
@@ -67,6 +66,14 @@
       {
         "command": "prompt2code.createFile",
         "title": "Prompt2Code: Create File with AI"
+      },
+      {
+        "command": "prompt2code.signIn",
+        "title": "Prompt2Code: Sign In with Google"
+      },
+      {
+        "command": "prompt2code.signOut",
+        "title": "Prompt2Code: Sign Out"
       }
     ],
     "keybindings": [
@@ -161,6 +168,7 @@
     "typescript": "^5.3.0"
   },
   "dependencies": {
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "firebase": "^12.9.0"
   }
 }

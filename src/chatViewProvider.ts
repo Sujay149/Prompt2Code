@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { GroqClient, GroqMessage } from './groqClient';
+import { GoogleAuthProvider } from './authProvider';
 import {
   listWorkspaceFiles,
   createWorkspaceFile,
@@ -29,8 +30,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private checkpoints = new Map<string, { uri: vscode.Uri; content: string }>();
   private checkpointCounter = 0;
 
+  /** Google Auth provider (injected by extension.ts). */
+  private authProvider?: GoogleAuthProvider;
+
   constructor(private readonly _extensionUri: vscode.Uri) {
     this.groqClient = new GroqClient();
+  }
+
+  /** Called from extension.ts after construction. */
+  public setAuthProvider(auth: GoogleAuthProvider) {
+    this.authProvider = auth;
+    auth.onDidChangeAuth(async () => {
+      await this.sendAuthStateToWebview();
+    });
+  }
+
+  /** Push current auth state (signed-in / signed-out) to the webview. */
+  private async sendAuthStateToWebview() {
+    if (!this._view) { return; }
+    const signedIn = this.authProvider ? await this.authProvider.isAuthenticated() : false;
+    const user = signedIn ? await this.authProvider?.getUserInfo() ?? null : null;
+    this._view.webview.postMessage({ type: 'authState', signedIn, user });
   }
 
   public resolveWebviewView(
@@ -64,6 +84,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // Send available models + current selection to webview
     this.sendModelListToWebview();
+
+    // Send auth state on first render
+    this.sendAuthStateToWebview();
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
       console.log('Webview → Extension:', data);
@@ -148,6 +171,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         case 'executePlan': {
           await this.executePlan(data.plan);
+          break;
+        }
+
+        case 'googleSignIn': {
+          if (this.authProvider) {
+            const user = await this.authProvider.signIn();
+            if (user) {
+              vscode.window.showInformationMessage(`Signed in as ${user.name} (${user.email})`);
+            } else {
+              vscode.window.showWarningMessage('Google Sign-In was cancelled or failed.');
+            }
+            await this.sendAuthStateToWebview();
+          }
+          break;
+        }
+
+        case 'googleSignOut': {
+          if (this.authProvider) {
+            await this.authProvider.signOut();
+            vscode.window.showInformationMessage('Signed out of Prompt2Code');
+            await this.sendAuthStateToWebview();
+          }
           break;
         }
       }
@@ -333,6 +378,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleUserMessage(message: string, attachedFiles: string[] = []) {
     if (!message || !message.trim()) return;
+
+    // Gate behind Google auth
+    if (this.authProvider && !(await this.authProvider.isAuthenticated())) {
+      this._view?.webview.postMessage({
+        type: 'error',
+        message: '🔒 Please sign in with Google before using Prompt2Code.'
+      });
+      return;
+    }
 
     console.log('📨 Handling message:', message, 'mode:', this.currentMode, 'attached:', attachedFiles);
 
@@ -711,15 +765,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // The updater tracks the current range, but do a safety pass to guarantee correctness
           const docAfter = editor.document;
           const textNow = docAfter.getText();
-          const before = textNow.substring(0, startOffset);
           const after = textNow.substring(startOffset);
           // The streamed region starts at startOffset — find what's currently there
           // and replace with the final accumulated newBlock if it doesn't match.
           if (!after.startsWith(newBlock)) {
-            // Determine end of the region the updater was writing into
-            const currentRegionLen = textNow.length - (doc.getText().length - originalLen - startOffset > 0
-              ? doc.getText().length - originalLen
-              : textNow.length - newBlock.length);
             // Simplest approach: just replace from startOffset to startOffset + whatever the updater wrote
             const safeEnd = Math.min(textNow.length, startOffset + Math.max(newBlock.length, originalLen));
             await this.replaceRange(
@@ -1181,6 +1230,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     mimeType: string,
     fileName: string
   ): Promise<void> {
+    // Gate behind Google auth
+    if (this.authProvider && !(await this.authProvider.isAuthenticated())) {
+      this._view?.webview.postMessage({
+        type: 'error',
+        message: '🔒 Please sign in with Google before using Prompt2Code.'
+      });
+      return;
+    }
+
     // Show user message with image indicator
     this._view?.webview.postMessage({
       type: 'userMessage',
@@ -1828,7 +1886,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: https://*.googleusercontent.com;">
 <style>
   * { box-sizing: border-box; }
   body {
@@ -2278,10 +2336,122 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     font-size: 12px;
     line-height: 1.6;
   }
+  /* ── Login overlay ── */
+  .login-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 999;
+    background: var(--vscode-sideBar-background);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px;
+    text-align: center;
+  }
+  .login-overlay.hidden { display: none; }
+  .login-overlay .logo {
+    font-size: 36px;
+    margin-bottom: 4px;
+  }
+  .login-overlay h2 {
+    margin: 0;
+    font-size: 18px;
+    color: var(--vscode-foreground);
+  }
+  .login-overlay p {
+    margin: 0;
+    font-size: 13px;
+    opacity: 0.65;
+    max-width: 260px;
+    line-height: 1.5;
+  }
+  .google-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 24px;
+    background: #4285f4;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    margin-top: 8px;
+  }
+  .google-btn:hover { opacity: 0.92; transform: translateY(-1px); }
+  .google-btn:active { transform: translateY(0); }
+  .google-btn .g-icon {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+  }
+  /* ── User avatar bar (shown when signed in) ── */
+  .user-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+  }
+  .user-bar.hidden { display: none; }
+  .user-bar img {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid var(--vscode-panel-border);
+  }
+  .user-bar .user-name {
+    flex: 1;
+    opacity: 0.85;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .user-bar .sign-out-btn {
+    background: none;
+    border: none;
+    color: var(--vscode-foreground);
+    opacity: 0.5;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .user-bar .sign-out-btn:hover {
+    opacity: 1;
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
+  }
 </style>
 </head>
 
 <body>
+  <!-- LOGIN OVERLAY — hides the chat until user signs in -->
+  <div class="login-overlay" id="loginOverlay">
+    <div class="logo">🚀</div>
+    <h2>Welcome to Prompt2Code</h2>
+    <p>Sign in with your Google account to start generating code with AI.</p>
+    <button class="google-btn" id="googleSignInBtn">
+      <span class="g-icon">G</span> Sign in with Google
+    </button>
+  </div>
+
+  <!-- USER BAR — shown when signed in -->
+  <div class="user-bar hidden" id="userBar">
+    <img id="userAvatar" src="" alt="" />
+    <span class="user-name" id="userName"></span>
+    <button class="sign-out-btn" id="signOutBtn">Sign out</button>
+  </div>
+
   <div class="header">
     <strong>Prompt2Code</strong>
     <div class="header-actions">
@@ -2303,9 +2473,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="typing" id="typingIndicator">⏳ Working… generating code in the editor</div>
   <div class="attached-files" id="attachedFiles"></div>
   <div class="mode-selector">
-    <button class="mode-btn" data-mode="ask" title="Ask questions about code"><span class="mode-icon">💬</span>Ask</button>
-    <button class="mode-btn active" data-mode="agent" title="Edit code, create files"><span class="mode-icon">⚡</span>Agent</button>
-    <button class="mode-btn" data-mode="plan" title="Plan before implementing"><span class="mode-icon">📋</span>Plan</button>
+    <button class="mode-btn" data-mode="ask" title="Ask questions about code"><span class="mode-icon"></span>Ask</button>
+    <button class="mode-btn active" data-mode="agent" title="Edit code, create files"><span class="mode-icon"></span>Agent</button>
+    <button class="mode-btn" data-mode="plan" title="Plan before implementing"><span class="mode-icon"></span>Plan</button>
     <span class="mode-hint" id="modeHint">Auto-edits files & creates code</span>
   </div>
   <div class="model-selector-bar">
@@ -2340,6 +2510,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const attachedFilesEl = document.getElementById('attachedFiles');
   const modelSelect = document.getElementById('modelSelect');
   const modelCtx = document.getElementById('modelCtx');
+
+  // ── Auth elements ──
+  const loginOverlay = document.getElementById('loginOverlay');
+  const googleSignInBtn = document.getElementById('googleSignInBtn');
+  const userBar = document.getElementById('userBar');
+  const userAvatar = document.getElementById('userAvatar');
+  const userName = document.getElementById('userName');
+  const signOutBtn = document.getElementById('signOutBtn');
+
+  googleSignInBtn.onclick = () => {
+    googleSignInBtn.disabled = true;
+    googleSignInBtn.textContent = 'Opening browser…';
+    vscode.postMessage({ type: 'googleSignIn' });
+    // Re-enable after 5 s in case user closes the tab
+    setTimeout(() => { googleSignInBtn.disabled = false; googleSignInBtn.innerHTML = '<span class="g-icon">G</span> Sign in with Google'; }, 5000);
+  };
+  signOutBtn.onclick = () => { vscode.postMessage({ type: 'googleSignOut' }); };
+
+  function applyAuthState(signedIn, user) {
+    if (signedIn && user) {
+      loginOverlay.classList.add('hidden');
+      userBar.classList.remove('hidden');
+      userAvatar.src = user.picture || '';
+      userName.textContent = user.name || user.email || 'User';
+    } else {
+      loginOverlay.classList.remove('hidden');
+      userBar.classList.add('hidden');
+    }
+  }
 
   let loading = false;
   let availableModels = [];
@@ -2501,6 +2700,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   window.addEventListener('message', event => {
     const msg = event.data;
 
+    if (msg.type === 'authState') { applyAuthState(msg.signedIn, msg.user); }
     if (msg.type === 'userMessage') add('You', msg.message, 'user');
     if (msg.type === 'assistantMessage') add('AI', msg.message, 'assistant');
     if (msg.type === 'linkCheckpoint') {
