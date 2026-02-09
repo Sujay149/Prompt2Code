@@ -4,12 +4,16 @@ import { GroqClient, GroqMessage } from './groqClient';
 import {
   listWorkspaceFiles,
   createWorkspaceFile,
+  createWorkspaceFileQuiet,
+  parseMultiFileResponse,
   buildProjectTree,
   readFilesAsContext,
   extractFileReferences,
   stripFileReferences,
   gatherProjectContext,
 } from './workspaceHelper';
+
+export type ChatMode = 'ask' | 'agent' | 'plan';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'prompt2code.chatView';
@@ -19,6 +23,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private conversationHistory: GroqMessage[] = [];
   private lastTextEditor?: vscode.TextEditor;
   private disposables: vscode.Disposable[] = [];
+  private currentMode: ChatMode = 'agent';
 
   /** Checkpoint store: id → { uri, content } for undo/restore. */
   private checkpoints = new Map<string, { uri: vscode.Uri; content: string }>();
@@ -125,6 +130,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         case 'selectModel': {
           await this.handleModelSelection(data.modelId);
+          break;
+        }
+
+        case 'setMode': {
+          const mode = data.mode as ChatMode;
+          if (['ask', 'agent', 'plan'].includes(mode)) {
+            this.currentMode = mode;
+            this._view?.webview.postMessage({ type: 'modeChanged', mode });
+          }
+          break;
+        }
+
+        case 'executePlan': {
+          await this.executePlan(data.plan);
           break;
         }
       }
@@ -311,7 +330,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleUserMessage(message: string, attachedFiles: string[] = []) {
     if (!message || !message.trim()) return;
 
-    console.log('📨 Handling message:', message, 'attached:', attachedFiles);
+    console.log('📨 Handling message:', message, 'mode:', this.currentMode, 'attached:', attachedFiles);
 
     // 1️⃣ Show user message immediately (checkpointId attached later for code-edit path)
     this._view?.webview.postMessage({
@@ -321,6 +340,238 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // 2️⃣ Save conversation (for chat mode history)
     this.conversationHistory.push({ role: 'user', content: message });
+
+    // 3️⃣ Route to the appropriate handler based on mode
+    switch (this.currentMode) {
+      case 'ask':
+        await this.handleAskMode(message, attachedFiles);
+        return;
+      case 'plan':
+        await this.handlePlanMode(message, attachedFiles);
+        return;
+      case 'agent':
+      default:
+        await this.handleAgentMode(message, attachedFiles);
+        return;
+    }
+  }
+
+  // ===========================
+  // ASK MODE — Chat only, no file edits
+  // ===========================
+
+  private async handleAskMode(message: string, attachedFiles: string[] = []) {
+    this._view?.webview.postMessage({ type: 'loading', isLoading: true });
+
+    try {
+      const activeModel = this.groqClient.getActiveModel();
+      const apiKey = this.groqClient.getApiKeyForModel(activeModel);
+      if (!apiKey || apiKey.trim() === '') {
+        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
+        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown below to set its key.\n\nGet your free API key at: https://console.groq.com`);
+      }
+
+      const fileRefs = extractFileReferences(message);
+      const cleanMessage = stripFileReferences(message);
+      const allFileRefs = [...new Set([...fileRefs, ...attachedFiles])];
+
+      let referencedFilesContext = '';
+      if (allFileRefs.length > 0) {
+        referencedFilesContext = await readFilesAsContext(allFileRefs);
+      }
+
+      const editor = this.getTargetEditor();
+      const doc = editor?.document;
+      const languageId = doc?.languageId ?? 'plaintext';
+
+      let contextInfo = '';
+      if (doc) {
+        contextInfo = `\n\nCurrent file: ${doc.fileName} (${languageId})`;
+        // Include current file content for ask mode so AI can answer about it
+        const fileContent = doc.getText();
+        if (fileContent.length < 15000) {
+          contextInfo += `\n\nFile content:\n${fileContent}`;
+        } else {
+          contextInfo += `\n\nFile content (first 15000 chars):\n${fileContent.substring(0, 15000)}\n/* ...truncated... */`;
+        }
+      }
+      if (referencedFilesContext) {
+        contextInfo += `\n\nReferenced files:\n${referencedFilesContext}`;
+      }
+
+      if (/(@workspace|project structure|codebase|all files)/i.test(message)) {
+        const tree = await buildProjectTree();
+        contextInfo += `\n\nProject files:\n${tree}`;
+      }
+
+      const chatCharBudget = this.groqClient.getContextCharBudget();
+      const projCtx = await gatherProjectContext({
+        languageId: doc?.languageId,
+        currentFilePath: doc?.uri.fsPath,
+        maxChars: Math.min(chatCharBudget, 15_000),
+        maxFiles: 5,
+      });
+      if (projCtx.text) {
+        contextInfo += `\n\nProject context (${projCtx.fileCount} files):\n${projCtx.text}`;
+      }
+
+      const messages: GroqMessage[] = [
+        {
+          role: 'system',
+          content:
+            'You are a helpful coding assistant in ASK mode. Your job is to EXPLAIN, ANSWER QUESTIONS, and provide GUIDANCE about code.\n\n' +
+            'RULES:\n' +
+            '- Do NOT output full code rewrites or file contents.\n' +
+            '- Provide clear, concise explanations with code snippets only when helpful.\n' +
+            '- If the user asks you to change/edit/create code, remind them to switch to Agent mode.\n' +
+            '- Use minimal markdown. Keep responses focused and readable.\n' +
+            '- Reference specific line numbers and function names when explaining code.'
+        },
+        ...this.conversationHistory.slice(0, -1),
+        { role: 'user', content: cleanMessage + contextInfo }
+      ];
+
+      console.log('🚀 Calling Groq API (ask mode)...');
+      const rawResponse = await this.groqClient.complete(messages, false);
+      const response = this.sanitizeChatResponse(rawResponse);
+
+      this.conversationHistory.push({ role: 'assistant', content: response });
+      this._view?.webview.postMessage({ type: 'assistantMessage', message: response });
+
+    } catch (err: any) {
+      console.error('❌ Ask mode error:', err);
+      this._view?.webview.postMessage({
+        type: 'error',
+        message: err.message || 'Failed to get response.'
+      });
+    } finally {
+      this._view?.webview.postMessage({ type: 'loading', isLoading: false });
+    }
+  }
+
+  // ===========================
+  // PLAN MODE — Generate step-by-step plan, then optionally execute
+  // ===========================
+
+  private async handlePlanMode(message: string, attachedFiles: string[] = []) {
+    this._view?.webview.postMessage({ type: 'loading', isLoading: true });
+
+    try {
+      const activeModel = this.groqClient.getActiveModel();
+      const apiKey = this.groqClient.getApiKeyForModel(activeModel);
+      if (!apiKey || apiKey.trim() === '') {
+        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
+        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown below to set its key.\n\nGet your free API key at: https://console.groq.com`);
+      }
+
+      const fileRefs = extractFileReferences(message);
+      const cleanMessage = stripFileReferences(message);
+      const allFileRefs = [...new Set([...fileRefs, ...attachedFiles])];
+
+      let referencedFilesContext = '';
+      if (allFileRefs.length > 0) {
+        referencedFilesContext = await readFilesAsContext(allFileRefs);
+      }
+
+      const editor = this.getTargetEditor();
+      const doc = editor?.document;
+
+      let contextInfo = '';
+      if (doc) {
+        contextInfo = `\n\nCurrent file: ${doc.fileName} (${doc.languageId})\nLines: ${doc.lineCount}`;
+        // Include file structure summary
+        const fileContent = doc.getText();
+        if (fileContent.length < 20000) {
+          contextInfo += `\n\nFile content:\n${fileContent}`;
+        } else {
+          contextInfo += `\n\nFile content (first 20000 chars):\n${fileContent.substring(0, 20000)}\n/* ...truncated... */`;
+        }
+      }
+      if (referencedFilesContext) {
+        contextInfo += `\n\nReferenced files:\n${referencedFilesContext}`;
+      }
+
+      // Always include project tree for planning
+      const tree = await buildProjectTree();
+      contextInfo += `\n\nProject structure:\n${tree}`;
+
+      const chatCharBudget = this.groqClient.getContextCharBudget();
+      const projCtx = await gatherProjectContext({
+        languageId: doc?.languageId,
+        currentFilePath: doc?.uri.fsPath,
+        maxChars: Math.min(chatCharBudget, 20_000),
+        maxFiles: 8,
+      });
+      if (projCtx.text) {
+        contextInfo += `\n\nProject context (${projCtx.fileCount} files):\n${projCtx.text}`;
+      }
+
+      const messages: GroqMessage[] = [
+        {
+          role: 'system',
+          content:
+            'You are an expert coding assistant in PLAN mode. Your job is to analyze the request and produce a clear, actionable IMPLEMENTATION PLAN.\n\n' +
+            'FORMAT YOUR PLAN EXACTLY LIKE THIS:\n' +
+            '## Plan: [brief title]\n\n' +
+            '### Steps:\n' +
+            '1. **[Action]** — [File/location]: [What to do]\n' +
+            '2. **[Action]** — [File/location]: [What to do]\n' +
+            '...\n\n' +
+            '### Details:\n' +
+            '[Brief description of key implementation details, patterns to follow, and potential pitfalls]\n\n' +
+            'RULES:\n' +
+            '- Be SPECIFIC: mention exact file names, function names, line ranges when possible.\n' +
+            '- Each step should be a single, concrete action (add, modify, create, delete, move).\n' +
+            '- Order steps by dependency — what must be done first.\n' +
+            '- Include estimated scope (e.g., "~20 lines", "new file").\n' +
+            '- Mention potential risks or things to watch out for.\n' +
+            '- Do NOT generate code in plan mode — only describe what to do.\n' +
+            '- Keep it concise but thorough. Max 10 steps for most tasks.'
+        },
+        ...this.conversationHistory.slice(0, -1),
+        { role: 'user', content: cleanMessage + contextInfo }
+      ];
+
+      console.log('🚀 Calling Groq API (plan mode)...');
+      const rawResponse = await this.groqClient.complete(messages, false);
+      const response = this.sanitizeChatResponse(rawResponse);
+
+      this.conversationHistory.push({ role: 'assistant', content: response });
+
+      // Send plan with execute button
+      this._view?.webview.postMessage({
+        type: 'planMessage',
+        message: response,
+        originalRequest: cleanMessage,
+      });
+
+    } catch (err: any) {
+      console.error('❌ Plan mode error:', err);
+      this._view?.webview.postMessage({
+        type: 'error',
+        message: err.message || 'Failed to generate plan.'
+      });
+    } finally {
+      this._view?.webview.postMessage({ type: 'loading', isLoading: false });
+    }
+  }
+
+  /**
+   * Execute a plan by switching to agent mode and asking the AI to implement it.
+   */
+  private async executePlan(plan: string) {
+    const executeMessage = `Implement the following plan. Apply all changes step by step:\n\n${plan}`;
+    const previousMode = this.currentMode;
+    this.currentMode = 'agent';
+    await this.handleUserMessage(executeMessage, []);
+    this.currentMode = previousMode;
+  }
+
+  // ===========================
+  // AGENT MODE — Full auto (edit files, create files, chat)
+  // ===========================
+
+  private async handleAgentMode(message: string, attachedFiles: string[] = []) {
 
     // 3️⃣ Show loading
     this._view?.webview.postMessage({
@@ -356,6 +607,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       if (createFileMatch) {
         await this.handleCreateFile(cleanMessage, createFileMatch, referencedFilesContext);
+        return;
+      }
+
+      // ── Detect multi-file / scaffold intent ──
+      if (this.isMultiFileIntent(cleanMessage)) {
+        await this.handleMultiFileGeneration(cleanMessage, referencedFilesContext);
         return;
       }
 
@@ -739,9 +996,153 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private isCodeEditIntent(userMessage: string): boolean {
     // If the user wants to create a *new* file, that's handled separately.
     if (this.detectCreateFileIntent(userMessage)) { return false; }
+    // If it's a multi-file intent, don't treat as single-file edit
+    if (this.isMultiFileIntent(userMessage)) { return false; }
     // Broad keyword-based intent detection — anything that sounds like
     // an action on code should go to the editor, not chat.
     return /\b(change|update|modify|replace|create|generate|convert|enhance|improve|refactor|fix|optimise|optimize|rewrite|redesign|style|beautify|add|remove|delete|implement|build|make|write|edit|transform|migrate|upgrade|redo|revamp|restyle|tweak|adjust|clean|format|lint|minify|simplify|extend|expand|rework|overhaul|design|code|develop|scaffold|setup|set\s*up)\b/i.test(userMessage);
+  }
+
+  /**
+   * Detect if the user wants to create/modify multiple files or scaffold a structure.
+   */
+  private isMultiFileIntent(msg: string): boolean {
+    const lower = msg.toLowerCase();
+    // Explicit multi-file patterns
+    if (/\b(scaffold|boilerplate|project structure|folder structure|file structure)\b/i.test(lower)) { return true; }
+    if (/\bcreate\s+(all|multiple|several|the)\s+(files|components|pages|modules|routes)\b/i.test(lower)) { return true; }
+    if (/\bset\s*up\s+(a |the )?(project|app|application|repo|repository)\b/i.test(lower)) { return true; }
+    // Mentions 2+ file paths
+    const filePathMentions = lower.match(/\b[\w/\\-]+\.\w{1,5}\b/g) || [];
+    if (filePathMentions.length >= 2) { return true; }
+    // "create X and Y" pattern
+    if (/\bcreate\b.+\band\b.+\b(file|component|page|module)\b/i.test(lower)) { return true; }
+    // "with files" / "with components"
+    if (/\bwith\s+(files|components|pages|modules|routes|folders)\b/i.test(lower)) { return true; }
+    return false;
+  }
+
+  /**
+   * Handle multi-file generation: ask AI to output multiple files,
+   * parse the structured response, and create them all in the workspace.
+   */
+  private async handleMultiFileGeneration(
+    instruction: string,
+    referencedFilesContext: string
+  ): Promise<void> {
+    this._view?.webview.postMessage({
+      type: 'assistantMessage',
+      message: '⏳ Analyzing project structure and generating files…'
+    });
+
+    // Build rich project context
+    const tree = await buildProjectTree();
+    const contextParts: string[] = [];
+    if (referencedFilesContext) { contextParts.push(referencedFilesContext); }
+
+    const charBudget = this.groqClient.getContextCharBudget();
+    const projCtx = await gatherProjectContext({
+      maxChars: Math.min(charBudget, 30_000),
+      maxFiles: 10,
+    });
+    if (projCtx.text) { contextParts.push(projCtx.text); }
+
+    const systemPrompt = [
+      'You are an expert developer generating MULTIPLE FILES for a project.',
+      '',
+      'RULES (FOLLOW EXACTLY):',
+      '- Output each file using this EXACT format:',
+      '',
+      '===FILE: path/to/file.ext===',
+      '...file content...',
+      '===END_FILE===',
+      '',
+      '- Use relative paths from the workspace root.',
+      '- Match the existing project structure, conventions, and style.',
+      '- Create complete, production-ready file contents.',
+      '- Include proper imports, exports, and type annotations.',
+      '- Do NOT add markdown, explanations, or comments outside of file blocks.',
+      '- Do NOT wrap file blocks in code fences.',
+      '- If modifying an existing file, output the COMPLETE updated file content.',
+      '- Order files so dependencies come before dependents.',
+    ].join('\n');
+
+    let userPrompt = `Instruction: ${instruction}\n\n`;
+    userPrompt += `Current project structure:\n${tree}\n\n`;
+    if (contextParts.length > 0) {
+      const ctx = contextParts.join('\n\n');
+      const budget = Math.floor(charBudget * 0.6);
+      userPrompt += `Project context:\n${ctx.length > budget ? ctx.slice(0, budget) + '\n/* ...trimmed... */' : ctx}\n\n`;
+    }
+    userPrompt += 'Generate the files now. Use ===FILE: path=== and ===END_FILE=== delimiters for each file.';
+
+    const messages: GroqMessage[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ];
+
+    console.log('🚀 Calling Groq API (multi-file generation)...');
+    const rawResponse = await this.groqClient.complete(messages, false);
+
+    // Parse structured file blocks from the response
+    const fileBlocks = parseMultiFileResponse(rawResponse);
+
+    if (fileBlocks.length === 0) {
+      // AI didn't use the structured format — fall back to showing the response as chat
+      this._view?.webview.postMessage({
+        type: 'assistantMessage',
+        message: rawResponse,
+      });
+      return;
+    }
+
+    // Create all files
+    const created: string[] = [];
+    const failed: string[] = [];
+    let firstUri: vscode.Uri | undefined;
+
+    for (const block of fileBlocks) {
+      try {
+        const uri = await createWorkspaceFileQuiet(block.path, block.content);
+        if (uri) {
+          created.push(block.path);
+          if (!firstUri) { firstUri = uri; }
+        } else {
+          failed.push(block.path);
+        }
+      } catch (err: any) {
+        console.error(`Failed to create ${block.path}:`, err);
+        failed.push(block.path);
+      }
+    }
+
+    // Open the first created file in the editor
+    if (firstUri) {
+      try {
+        const doc = await vscode.workspace.openTextDocument(firstUri);
+        await vscode.window.showTextDocument(doc, { preview: false });
+      } catch { /* non-fatal */ }
+    }
+
+    // Build summary message
+    let summary = `✅ Created ${created.length} file${created.length !== 1 ? 's' : ''}:\n\n`;
+    for (const f of created) {
+      summary += `  📄 ${f}\n`;
+    }
+    if (failed.length > 0) {
+      summary += `\n⚠️ Failed to create ${failed.length} file${failed.length !== 1 ? 's' : ''}:\n`;
+      for (const f of failed) {
+        summary += `  ❌ ${f}\n`;
+      }
+    }
+
+    this._view?.webview.postMessage({
+      type: 'assistantMessage',
+      message: summary,
+    });
+
+    this.conversationHistory.push({ role: 'assistant', content: summary });
+    vscode.window.showInformationMessage(`Prompt2Code: Created ${created.length} files`);
   }
 
   private determineTargetLanguage(
@@ -1590,6 +1991,84 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     opacity: 0.5;
     white-space: nowrap;
   }
+  /* ── Mode selector (Copilot-style) ── */
+  .mode-selector {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 6px 10px;
+    border-top: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-sideBar-background);
+  }
+  .mode-btn {
+    padding: 4px 12px;
+    font-size: 11px;
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+    background: transparent;
+    border: 1px solid var(--vscode-panel-border);
+    cursor: pointer;
+    transition: all 0.15s;
+    opacity: 0.6;
+    white-space: nowrap;
+  }
+  .mode-btn:first-child {
+    border-radius: 4px 0 0 4px;
+  }
+  .mode-btn:last-child {
+    border-radius: 0 4px 4px 0;
+  }
+  .mode-btn:not(:first-child) {
+    border-left: none;
+  }
+  .mode-btn:hover {
+    opacity: 0.85;
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.07));
+  }
+  .mode-btn.active {
+    opacity: 1;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: var(--vscode-button-background);
+    font-weight: 600;
+  }
+  .mode-btn .mode-icon {
+    margin-right: 4px;
+    font-size: 12px;
+  }
+  .mode-hint {
+    margin-left: 8px;
+    font-size: 10px;
+    opacity: 0.45;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* ── Plan execute button ── */
+  .plan-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--vscode-panel-border);
+  }
+  .plan-actions button {
+    padding: 5px 14px;
+    font-size: 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: none;
+  }
+  .plan-execute-btn {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
+  .plan-execute-btn:hover { opacity: 0.9; }
+  .plan-copy-btn {
+    background: var(--vscode-button-secondaryBackground, #3a3d41);
+    color: var(--vscode-button-secondaryForeground, #fff);
+  }
+  .plan-copy-btn:hover { opacity: 0.9; }
   /* ── Diff summary styling in bubble ── */
   .bubble .diff-summary {
     font-family: var(--vscode-editor-font-family, monospace);
@@ -1609,9 +2088,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   </div>
 
   <div class="hint">
-    Use <b>@file path/to/file</b> to include files &middot;
+    <b>@file</b> to include files &middot;
     <b>@workspace</b> for project tree &middot;
-    <b>"create file src/x.ts …"</b> to create new files
+    <b>"create file …"</b> to create new files
   </div>
 
   <div class="loading-bar" id="loadingBar"></div>
@@ -1620,6 +2099,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   <div class="typing" id="typingIndicator">⏳ Working… generating code in the editor</div>
   <div class="attached-files" id="attachedFiles"></div>
+  <div class="mode-selector">
+    <button class="mode-btn" data-mode="ask" title="Ask questions about code"><span class="mode-icon">💬</span>Ask</button>
+    <button class="mode-btn active" data-mode="agent" title="Edit code, create files"><span class="mode-icon">⚡</span>Agent</button>
+    <button class="mode-btn" data-mode="plan" title="Plan before implementing"><span class="mode-icon">📋</span>Plan</button>
+    <span class="mode-hint" id="modeHint">Auto-edits files & creates code</span>
+  </div>
   <div class="model-selector-bar">
     <label>Model:</label>
     <select id="modelSelect"><option>Loading…</option></select>
@@ -1649,6 +2134,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   let loading = false;
   let availableModels = [];
+  let currentMode = 'agent';
+
+  const modeHints = {
+    ask: 'Explains code — no file edits',
+    agent: 'Auto-edits files & creates code',
+    plan: 'Creates a plan before implementing'
+  };
+
+  // ── Mode selector ──
+  const modeBtns = document.querySelectorAll('.mode-btn');
+  const modeHint = document.getElementById('modeHint');
+
+  modeBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.mode;
+      if (mode === currentMode) return;
+      currentMode = mode;
+      modeBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      modeHint.textContent = modeHints[mode] || '';
+      vscode.postMessage({ type: 'setMode', mode });
+
+      // Update placeholder
+      const placeholders = {
+        ask: 'Ask about your code… (no file edits)',
+        agent: 'Ask Prompt2Code… (use @file or @workspace)',
+        plan: 'Describe what you want to build…'
+      };
+      input.placeholder = placeholders[mode] || placeholders.agent;
+    });
+  });
 
   // ── Tracked / attached files state ──
   // { relPath, fileName, languageId, source: 'active'|'manual' }
@@ -1737,6 +2253,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (msg.type === 'clearMessages') chat.innerHTML = '';
     if (msg.type === 'error') add('Error', msg.message, 'assistant');
+    if (msg.type === 'modeChanged') {
+      currentMode = msg.mode;
+      modeBtns.forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === msg.mode);
+      });
+      modeHint.textContent = modeHints[msg.mode] || '';
+    }
+    if (msg.type === 'planMessage') {
+      // Show plan with execute button
+      addPlan(msg.message, msg.originalRequest);
+    }
     if (msg.type === 'checkpoint') addCheckpointBanner(msg.id);
     if (msg.type === 'insertFileRef') {
       // From the 📎 file picker — add as a manual chip
@@ -1900,6 +2427,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       div.innerHTML = '<span>↩ Restored to previous state</span>';
       setTimeout(() => div.remove(), 2000);
     };
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  // Handle plan message with execute button
+  function addPlan(text, originalRequest) {
+    const div = document.createElement('div');
+    div.className = 'msg assistant';
+
+    const header = document.createElement('div');
+    header.className = 'msg-header';
+    const label = document.createElement('span');
+    label.className = 'msg-label';
+    label.textContent = '📋 Plan';
+    header.appendChild(label);
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+
+    const actions = document.createElement('div');
+    actions.className = 'plan-actions';
+
+    const execBtn = document.createElement('button');
+    execBtn.className = 'plan-execute-btn';
+    execBtn.textContent = '▶ Execute Plan';
+    execBtn.onclick = () => {
+      execBtn.disabled = true;
+      execBtn.textContent = '⏳ Executing…';
+      vscode.postMessage({ type: 'executePlan', plan: text });
+    };
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'plan-copy-btn';
+    copyBtn.textContent = '📋 Copy Plan';
+    copyBtn.onclick = () => {
+      vscode.postMessage({ type: 'copyCode', code: text });
+      copyBtn.textContent = '✓ Copied';
+      setTimeout(() => { copyBtn.textContent = '📋 Copy Plan'; }, 1500);
+    };
+
+    actions.appendChild(execBtn);
+    actions.appendChild(copyBtn);
+
+    div.appendChild(header);
+    div.appendChild(bubble);
+    div.appendChild(actions);
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
   }

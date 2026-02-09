@@ -2,7 +2,7 @@
   "name": "prompt2code",
   "displayName": "Prompt2Code",
   "description": "Prompt-driven code generation and inline completions inside VS Code",
-  "version": "1.0.5",
+  "version": "1.1.1",
   "publisher": "SujayBabuThota",
   "repository": {
     "type": "git",

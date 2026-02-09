@@ -110,6 +110,67 @@ export async function createWorkspaceFile(
 }
 
 /**
+ * Create (or overwrite) a file in the workspace WITHOUT opening it in the editor.
+ * Returns the URI of the created file, or undefined on failure.
+ */
+export async function createWorkspaceFileQuiet(
+  relPath: string,
+  content: string
+): Promise<vscode.Uri | undefined> {
+  const root = getWorkspaceRoot();
+  if (!root) { return undefined; }
+
+  const abs = path.resolve(root, relPath);
+  if (!abs.startsWith(root)) { return undefined; }
+
+  const dir = path.dirname(abs);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const uri = vscode.Uri.file(abs);
+  const encoded = new TextEncoder().encode(content);
+  await vscode.workspace.fs.writeFile(uri, encoded);
+  return uri;
+}
+
+/**
+ * Parse a multi-file AI response into individual file blocks.
+ * Expected format:
+ *   ===FILE: path/to/file.ts===
+ *   ...file content...
+ *   ===END_FILE===
+ */
+export function parseMultiFileResponse(response: string): { path: string; content: string }[] {
+  const files: { path: string; content: string }[] = [];
+  // Match ===FILE: path=== ... ===END_FILE===  blocks
+  const pattern = /===FILE:\s*(.+?)\s*===\n([\s\S]*?)(?:===END_FILE===|(?====FILE:))/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(response))) {
+    const filePath = match[1].trim();
+    let content = match[2];
+    // Remove trailing ===END_FILE=== if caught inside
+    content = content.replace(/===END_FILE===\s*$/, '').trimEnd();
+    if (filePath && content) {
+      files.push({ path: filePath, content });
+    }
+  }
+
+  // Fallback: if no blocks found, try single ```file:path``` fenced blocks
+  if (files.length === 0) {
+    const fencedPattern = /```(?:\w+)?\s*(?:file:\s*(.+?))\n([\s\S]*?)```/g;
+    while ((match = fencedPattern.exec(response))) {
+      const filePath = match[1].trim();
+      const content = match[2].trimEnd();
+      if (filePath && content) {
+        files.push({ path: filePath, content });
+      }
+    }
+  }
+
+  return files;
+}
+
+/**
  * Build a compact project tree string for the AI prompt
  * so it can understand the project structure.
  */
