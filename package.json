@@ -169,6 +169,7 @@
   },
   "dependencies": {
     "axios": "^1.6.0",
-    "firebase": "^12.9.0"
+    "firebase": "^12.9.0",
+    "vscode": "^1.1.37"
   }
 }
