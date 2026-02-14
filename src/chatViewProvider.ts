@@ -1942,24 +1942,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     flex-direction: column;
   }
   .header {
-    padding: 10px;
+    padding: 14px 12px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-sideBar-background);
   }
-  .header-actions { display: flex; gap: 6px; }
+  .header strong {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+  }
+  .header-actions { display: flex; gap: 8px; }
   #newChat {
     padding: 6px 12px;
     font-size: 12px;
     background: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
-    transition: opacity 0.15s;
+    transition: all 0.15s;
+    font-weight: 600;
   }
-  #newChat:hover { opacity: 0.9; }
+  #newChat:hover { opacity: 0.85; transform: translateY(-1px); }
+  #newChat:active { transform: translateY(0); }
   #close {
     padding: 4px 8px;
     font-size: 18px;
@@ -1967,10 +1975,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     background: transparent;
     color: var(--vscode-foreground);
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
-    opacity: 0.6;
-    transition: opacity 0.15s, background 0.15s;
+    opacity: 0.5;
+    transition: all 0.15s;
   }
   #close:hover {
     opacity: 1;
