@@ -1935,122 +1935,162 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     margin: 0;
     padding: 0;
     font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
     background: var(--vscode-sideBar-background);
-    color: var(--vscode-foreground);
+    color: var(--vscode-sideBar-foreground);
     height: 100%;
     display: flex;
     flex-direction: column;
   }
+  
+  /* ═══ HEADER ═══ */
   .header {
-    padding: 14px 12px;
+    padding: 12px 16px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    border-bottom: 1px solid var(--vscode-panel-border);
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
     background: var(--vscode-sideBar-background);
   }
-  .header strong {
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: -0.3px;
-  }
-  .header-actions { display: flex; gap: 8px; }
-  #newChat {
-    padding: 6px 12px;
-    font-size: 12px;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.15s;
+  .header-title {
+    font-size: 11px;
     font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--vscode-sideBar-foreground);
+    opacity: 0.9;
   }
-  #newChat:hover { opacity: 0.85; transform: translateY(-1px); }
-  #newChat:active { transform: translateY(0); }
-  #close {
-    padding: 4px 8px;
-    font-size: 18px;
-    line-height: 1;
+  .header-actions { 
+    display: flex; 
+    gap: 4px; 
+    align-items: center;
+  }
+  .icon-btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
-    color: var(--vscode-foreground);
     border: none;
-    border-radius: 6px;
+    border-radius: 4px;
+    color: var(--vscode-sideBar-foreground);
     cursor: pointer;
-    opacity: 0.5;
+    opacity: 0.7;
     transition: all 0.15s;
+    font-size: 16px;
   }
-  #close:hover {
+  .icon-btn:hover {
     opacity: 1;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
+    background: var(--vscode-list-hoverBackground);
   }
+  
+  /* ═══ SESSIONS SECTION ═══ */
+  .sessions-section {
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+    max-height: 200px;
+    overflow-y: auto;
+    background: var(--vscode-sideBar-background);
+  }
+  .section-header {
+    padding: 10px 16px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.8;
+  }
+  .session-item {
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-left: 2px solid transparent;
+  }
+  .session-item:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+  .session-item.active {
+    background: var(--vscode-list-activeSelectionBackground);
+    border-left-color: var(--vscode-focusBorder);
+  }
+  .session-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--vscode-editor-foreground);
+    margin-bottom: 4px;
+  }
+  .session-meta {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.7;
+  }
+  
+  /* ═══ CHAT MESSAGES ═══ */
   .chat {
     flex: 1;
     overflow-y: auto;
-    padding: 16px 12px;
+    padding: 16px;
   }
   .msg {
-    margin-bottom: 16px;
+    margin-bottom: 20px;
     display: flex;
     flex-direction: column;
+    gap: 6px;
   }
-  .msg .msg-label {
+  .msg-label {
     font-size: 11px;
-    font-weight: 700;
-    color: var(--vscode-foreground);
-    opacity: 0.7;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.4px;
-    margin-bottom: 6px;
-  }
-  .msg.user .msg-label { 
-    opacity: 0.9;
-    color: var(--vscode-button-background);
-  }
-  .msg.assistant .msg-label { 
-    opacity: 0.6;
+    letter-spacing: 0.5px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.8;
   }
   .bubble {
-    color: var(--vscode-foreground);
-    background: var(--vscode-editor-background);
+    color: var(--vscode-editor-foreground);
+    background: transparent;
     padding: 10px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--vscode-panel-border);
+    border-radius: 6px;
     white-space: pre-wrap;
     font-size: 13px;
     line-height: 1.6;
     word-wrap: break-word;
   }
   .msg.user .bubble {
-    background: var(--vscode-input-background, rgba(100, 100, 100, 0.1));
-    border-color: var(--vscode-button-background);
-    border-left: 3px solid var(--vscode-button-background);
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-editorWidget-border);
   }
   .msg.assistant .bubble {
-    background: var(--vscode-editor-background);
-    border-color: var(--vscode-panel-border);
-    opacity: 0.95;
+    background: transparent;
+    border: none;
   }
   .msg-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 6px;
   }
   .msg-actions {
     display: flex;
-    gap: 4px;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
   }
+  .msg:hover .msg-actions { opacity: 1; }
   .msg-actions button {
     background: none;
     border: none;
-    color: var(--vscode-foreground);
-    opacity: 0;
+    color: var(--vscode-sideBar-foreground);
     cursor: pointer;
-    font-size: 13px;
+    font-size: 11px;
     padding: 4px 6px;
     border-radius: 4px;
+    opacity: 0.6;
     transition: all 0.15s;
+  }
+  .msg-actions button:hover {
+    opacity: 1;
+    background: var(--vscode-list-hoverBackground);
   }
   .msg-actions button svg {
     width: 14px;
@@ -2058,122 +2098,52 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     fill: currentColor;
     vertical-align: middle;
   }
-  .msg-actions button .check-icon { display: none; color: #4ade80; }
+  .msg-actions button .check-icon { 
+    display: none; 
+    color: #4ade80; 
+  }
   .msg-actions button.done svg { display: none; }
   .msg-actions button.done .check-icon { display: inline; }
-  .msg:hover .msg-actions button { opacity: 0.6; }
-  .msg-actions button:hover {
-    opacity: 1 !important;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.12));
-  }
-  .msg-actions button.restore-btn:hover {
-    color: #f97316;
-  }
-  /* ── Copilot-style chat input ── */
+  
+  /* ═══ INPUT SECTION ═══ */
   .chat-input-wrapper {
-    padding: 12px;
-    border-top: 1px solid var(--vscode-panel-border);
+    padding: 12px 16px 16px;
+    border-top: 1px solid var(--vscode-editorWidget-border);
     background: var(--vscode-sideBar-background);
   }
   .chat-input-container {
     display: flex;
     flex-direction: column;
     border-radius: 10px;
-    background: var(--vscode-input-background, var(--vscode-editor-background));
-    border: 1.5px solid var(--vscode-input-border, var(--vscode-panel-border));
-    transition: all 0.2s;
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-editorWidget-border);
+    transition: border-color 0.15s;
     overflow: hidden;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   }
   .chat-input-container:focus-within {
     border-color: var(--vscode-focusBorder);
-    box-shadow: 0 0 0 2px rgba(100, 150, 255, 0.2);
-  }
-  .mode-selector-compact {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-input-background, var(--vscode-editor-background));
-  }
-  .mode-tabs {
-    display: flex;
-    gap: 3px;
-  }
-  .mode-tab {
-    padding: 5px 12px;
-    font-size: 12px;
-    font-weight: 500;
-    background: transparent;
-    border: none;
-    color: var(--vscode-foreground);
-    cursor: pointer;
-    border-radius: 6px;
-    opacity: 0.65;
-    transition: all 0.15s;
-  }
-  .mode-tab:hover {
-    opacity: 0.85;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
-  }
-  .mode-tab.active {
-    opacity: 1;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    font-weight: 600;
-  }
-  .mode-hint-text {
-    font-size: 11px;
-    opacity: 0.5;
-    font-weight: 500;
-  }
-  .add-context-btn-inner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--vscode-panel-border);
-    color: var(--vscode-foreground);
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 500;
-    text-align: left;
-    transition: all 0.15s;
-    width: 100%;
-  }
-  .add-context-btn-inner:hover {
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06));
-  }
-  .add-context-btn-inner .icon {
-    font-size: 14px;
-    opacity: 0.75;
   }
   .chat-input-area {
-    padding: 11px 12px;
+    padding: 12px 14px;
   }
   .chat-input-area textarea {
     width: 100%;
     resize: none;
-    min-height: 36px;
-    max-height: 140px;
+    min-height: 20px;
+    max-height: 120px;
     padding: 0;
     border: none;
     outline: none;
     background: transparent;
-    color: var(--vscode-foreground);
+    color: var(--vscode-editor-foreground);
     font-family: var(--vscode-font-family);
-    font-size: 13px;
+    font-size: var(--vscode-font-size);
     line-height: 1.5;
     overflow-y: auto;
-    font-weight: 400;
   }
   .chat-input-area textarea::placeholder {
     color: var(--vscode-input-placeholderForeground);
-    opacity: 0.55;
-    font-weight: 400;
+    opacity: 0.6;
   }
   .chat-input-area textarea:disabled {
     opacity: 0.5;
@@ -2182,54 +2152,68 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   .chat-input-toolbar {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 10px;
-    border-top: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-input-background, var(--vscode-editor-background));
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-top: 1px solid var(--vscode-editorWidget-border);
+    background: var(--vscode-input-background);
   }
   .toolbar-left {
     display: flex;
     align-items: center;
-    gap: 2px;
-    flex: 1;
+    gap: 6px;
   }
   .toolbar-btn {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 5px 8px;
-    border-radius: 6px;
+    padding: 4px 8px;
+    border-radius: 4px;
     border: none;
     background: transparent;
-    color: var(--vscode-foreground);
+    color: var(--vscode-sideBar-foreground);
     cursor: pointer;
     font-size: 13px;
-    opacity: 0.65;
+    opacity: 0.7;
     transition: all 0.15s;
   }
   .toolbar-btn:hover {
     opacity: 1;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
-  }
-  .toolbar-btn .icon {
-    font-size: 16px;
+    background: var(--vscode-list-hoverBackground);
   }
   .toolbar-select {
-    padding: 5px 8px;
-    border-radius: 6px;
-    border: 1px solid var(--vscode-panel-border);
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--vscode-editorWidget-border);
     background: transparent;
-    color: var(--vscode-foreground);
+    color: var(--vscode-sideBar-foreground);
     cursor: pointer;
     font-size: 12px;
-    opacity: 0.85;
     transition: all 0.15s;
-    font-weight: 500;
   }
   .toolbar-select:hover {
-    opacity: 1;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
-    border-color: var(--vscode-focusBorder);
+    background: var(--vscode-list-hoverBackground);
+  }
+  .toolbar-send-btn {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    border-radius: 6px;
+    border: none;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: all 0.15s;
+  }
+  .toolbar-send-btn:hover {
+    opacity: 0.9;
+  }
+  .toolbar-send-btn:disabled {
+    opacity: 0.4;
+    cursor: not-started;
   }
   .image-preview-bar {
     display: flex;
@@ -2606,17 +2590,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   </div>
 
   <div class="header">
-    <strong>Prompt2Code</strong>
+    <div class="header-title">CHAT</div>
     <div class="header-actions">
-      <button id="newChat" title="Start a new chat">+</button>
-      <button id="close" title="Close panel">×</button>
+      <button class="icon-btn" id="newChat" title="New Chat">+</button>
+      <button class="icon-btn" id="settingsBtn" title="Settings">⚙️</button>
+      <button class="icon-btn" id="close" title="Close">×</button>
+    </div>
+  </div>
+
+  <!-- Sessions Section -->
+  <div class="sessions-section">
+    <div class="section-header">SESSIONS</div>
+    <div class="session-item active" id="currentSession">
+      <div class="session-title">Current conversation</div>
+      <div class="session-meta">Active now</div>
     </div>
   </div>
 
   <div class="hint">
-    <b>@file</b> to include files &middot;
-    <b>@workspace</b> for project tree &middot;
-    <b>"create file …"</b> to create new files
+    Use <b>@file</b> to include files · <b>@workspace</b> for project tree · <b>"create file..."</b> for new files
   </div>
 
   <div class="loading-bar" id="loadingBar"></div>
@@ -2677,6 +2669,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const send = document.getElementById('send');
   const newChat = document.getElementById('newChat');
   const close = document.getElementById('close');
+  const settingsBtn = document.getElementById('settingsBtn');
   const addContextBtn = document.getElementById('addContextBtn');
   const addFile = document.getElementById('addFile');
   const addImage = document.getElementById('addImage');

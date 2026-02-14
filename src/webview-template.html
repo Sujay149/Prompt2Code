@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en" style="height:100%;">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  body {
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    background: var(--vscode-sideBar-background);
+    color: var(--vscode-sideBar-foreground);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  
+  /* ═══ HEADER ═══ */
+  .header {
+    padding: 12px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+  }
+  
+  .header-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    opacity: 0.9;
+  }
+  
+  .header-actions { 
+    display: flex; 
+    gap: 4px; 
+  }
+  
+  .icon-btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--vscode-sideBar-foreground);
+    cursor: pointer;
+    opacity: 0.7;
+    transition: all 0.15s;
+    font-size: 16px;
+  }
+  
+  .icon-btn:hover {
+    opacity: 1;
+    background: var(--vscode-list-hoverBackground);
+  }
+  
+  /* ═══ SESSIONS SECTION ═══ */
+  .sessions-section {
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  
+  .section-header {
+    padding: 10px 16px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.8;
+  }
+  
+  .session-item {
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-left: 2px solid transparent;
+  }
+  
+  .session-item:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+  
+  .session-item.active {
+    background: var(--vscode-list-activeSelectionBackground);
+    border-left-color: var(--vscode-focusBorder);
+  }
+  
+  .session-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--vscode-editor-foreground);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .session-meta {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.7;
+  }
+  
+  /* ═══ CHAT MESSAGES ═══ */
+  .chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+  }
+  
+  .msg {
+    margin-bottom: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  
+  .msg-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  
+  .msg-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.8;
+  }
+  
+  .msg-actions {
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  
+  .msg:hover .msg-actions { opacity: 1; }
+  
+  .msg-actions button {
+    background: none;
+    border: none;
+    color: var(--vscode-sideBar-foreground);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    opacity: 0.6;
+    transition: all 0.15s;
+  }
+  
+  .msg-actions button:hover {
+    opacity: 1;
+    background: var(--vscode-list-hoverBackground);
+  }
+  
+  .bubble {
+    color: var(--vscode-editor-foreground);
+    padding: 10px 12px;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    font-size: 13px;
+    line-height: 1.6;
+    word-wrap: break-word;
+  }
+  
+  .msg.user .bubble {
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-editorWidget-border);
+  }
+  
+  .msg.assistant .bubble {
+    background: transparent;
+  }
+  
+  /* ═══ INPUT SECTION ═══ */
+  .chat-input-wrapper {
+    padding: 12px 16px 16px;
+    border-top: 1px solid var(--vscode-editorWidget-border);
+  }
+  
+  .chat-input-container {
+    display: flex;
+    flex-direction: column;
+    border-radius: 10px;
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-editorWidget-border);
+    transition: border-color 0.15s;
+    overflow: hidden;
+  }
+  
+  .chat-input-container:focus-within {
+    border-color: var(--vscode-focusBorder);
+  }
+  
+  .mode-selector {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+  }
+  
+  .mode-tabs {
+    display: flex;
+    gap: 4px;
+  }
+  
+  .mode-tab {
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: transparent;
+    border: none;
+    color: var(--vscode-sideBar-foreground);
+    cursor: pointer;
+    border-radius: 4px;
+    opacity: 0.7;
+    transition: all 0.15s;
+  }
+  
+  .mode-tab:hover {
+    opacity: 1;
+    background: var(--vscode-list-hoverBackground);
+  }
+  
+  .mode-tab.active {
+    opacity: 1;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    font-weight: 600;
+  }
+  
+  .mode-hint {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.7;
+  }
+  
+  .add-context-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+    color: var(--vscode-sideBar-foreground);
+    cursor: pointer;
+    font-size: 12px;
+    text-align: left;
+    transition: background 0.15s;
+    width: 100%;
+    opacity: 0.8;
+  }
+  
+  .add-context-btn:hover {
+    background: var(--vscode-list-hoverBackground);
+    opacity: 1;
+  }
+  
+  .chat-input-area {
+    padding: 12px 14px;
+  }
+  
+  .chat-input-area textarea {
+    width: 100%;
+    resize: none;
+    min-height: 20px;
+    max-height: 120px;
+    padding: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    line-height: 1.5;
+    overflow-y: auto;
+  }
+  
+  .chat-input-area textarea::placeholder {
+    color: var(--vscode-input-placeholderForeground);
+    opacity: 0.6;
+  }
+  
+  .chat-input-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-top: 1px solid var(--vscode-editorWidget-border);
+  }
+  
+  .toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  
+  .toolbar-btn {
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--vscode-sideBar-foreground);
+    cursor: pointer;
+    font-size: 13px;
+    opacity: 0.7;
+    transition: all 0.15s;
+  }
+  
+  .toolbar-btn:hover {
+    opacity: 1;
+    background: var(--vscode-list-hoverBackground);
+  }
+  
+  .toolbar-select {
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--vscode-editorWidget-border);
+    background: transparent;
+    color: var(--vscode-sideBar-foreground);
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.15s;
+  }
+  
+  .toolbar-select:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+  
+  .send-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: none;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+  }
+  
+  .send-btn:hover { opacity: 0.9; }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  
+  /* ═══ UTILITY ═══ */
+  .loading-bar {
+    height: 2px;
+    background: var(--vscode-progressBar-background);
+    animation: loading 1.5s ease-in-out infinite;
+    display: none;
+  }
+  
+  .loading-bar.active { display: block; }
+  
+  @keyframes loading {
+    0% { width: 20%; margin-left: 0; }
+    50% { width: 50%; margin-left: 25%; }
+    100% { width: 20%; margin-left: 80%; }
+  }
+  
+  .hint {
+    padding: 8px 16px;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.7;
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+  }
+  
+  .hidden { display: none !important; }
+  
+  /* Login Overlay */
+  .login-overlay {
+    position: absolute;
+    inset: 0;
+    background: var(--vscode-sideBar-background);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px;
+    text-align: center;
+    z-index: 999;
+  }
+  
+  .google-btn {
+    padding: 10px 24px;
+    background: #4285f4;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: opacity 0.15s;
+  }
+  
+  .google-btn:hover { opacity: 0.9; }
+</style>
+</head>
+
+<body>
+  <!-- Login Overlay -->
+  <div class="login-overlay hidden" id="loginOverlay">
+    <div style="font-size:48px">🚀</div>
+    <h2>Welcome to Prompt2Code</h2>
+    <p>Sign in with your Google account to start generating code with AI.</p>
+    <button class="google-btn" id="signInBtn">Sign in with Google</button>
+  </div>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-title">CHAT</div>
+    <div class="header-actions">
+      <button class="icon-btn" id="newChatBtn" title="New Chat">+</button>
+      <button class="icon-btn" id="settingsBtn" title="Settings">⚙️</button>
+      <button class="icon-btn" id="closeBtn" title="Close">×</button>
+    </div>
+  </div>
+
+  <!-- Sessions -->
+  <div class="sessions-section">
+    <div class="section-header">SESSIONS</div>
+    <div class="session-item active">
+      <div class="session-title">Build a dashboard component</div>
+      <div class="session-meta">Completed in 26s · 29 mins ago</div>
+    </div>
+    <div class="session-item">
+      <div class="session-title">Create API endpoints</div>
+      <div class="session-meta">Completed in 18s · 2 hours ago</div>
+    </div>
+  </div>
+
+  <!-- Hint -->
+  <div class="hint">
+    Use <b>@file</b> to include files · <b>@workspace</b> for project tree
+  </div>
+
+  <!-- Loading Bar -->
+  <div class="loading-bar" id="loadingBar"></div>
+
+  <!-- Chat Messages -->
+  <div class="chat" id="chat"></div>
+
+  <!-- Input -->
+  <div class="chat-input-wrapper">
+    <div class="chat-input-container">
+      <div class="mode-selector">
+        <div class="mode-tabs">
+          <button class="mode-tab" data-mode="ask">Ask</button>
+          <button class="mode-tab active" data-mode="agent">Agent</button>
+          <button class="mode-tab" data-mode="plan">Plan</button>
+        </div>
+        <span class="mode-hint" id="modeHint">Auto-edits files & creates code</span>
+      </div>
+      
+      <button class="add-context-btn" id="addContextBtn">
+        <span>📎</span>
+        <span>Add Context...</span>
+      </button>
+      
+      <div class="chat-input-area">
+        <textarea id="input" placeholder="Describe what to build next"></textarea>
+      </div>
+      
+      <div class="chat-input-toolbar">
+        <div class="toolbar-left">
+          <button class="toolbar-btn" id="addFileBtn" title="Add file">📄</button>
+          <button class="toolbar-btn" id="addImageBtn" title="Add image">🖼️</button>
+          <select class="toolbar-select" id="modelSelect">
+            <option>Loading...</option>
+          </select>
+        </div>
+        <button class="send-btn" id="sendBtn" title="Send">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M2 14L14 8L2 2V6L10 8L2 10V14Z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="imageInput" accept="image/*" style="display:none" />
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    const chat = document.getElementById('chat');
+    const input = document.getElementById('input');
+    const sendBtn = document.getElementById('sendBtn');
+    const newChatBtn = document.getElementById('newChatBtn');
+    const closeBtn = document.getElementById('closeBtn');
+    const addContextBtn = document.getElementById('addContextBtn');
+    const loadingBar = document.getElementById('loadingBar');
+    const loginOverlay = document.getElementById('loginOverlay');
+    const signInBtn = document.getElementById('signInBtn');
+    const modelSelect = document.getElementById('modelSelect');
+    
+    let currentMode = 'agent';
+    const modeHints = {
+      ask: 'Explains code — no file edits',
+      agent: 'Auto-edits files & creates code',
+      plan: 'Creates a plan before implementing'
+    };
+    
+    // Mode selector
+    document.querySelectorAll('.mode-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        currentMode = tab.dataset.mode;
+        document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('modeHint').textContent = modeHints[currentMode];
+        vscode.postMessage({ type: 'setMode', mode: currentMode });
+      });
+    });
+    
+    // Send message
+    sendBtn.onclick = () => {
+      const message = input.value.trim();
+      if (!message) return;
+      vscode.postMessage({ type: 'sendMessage', message });
+      input.value = '';
+      input.style.height = 'auto';
+    };
+    
+    // Enter to send
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendBtn.click();
+      }
+    });
+    
+    // Auto-grow textarea
+    input.addEventListener('input', () => {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    });
+    
+    // Buttons
+    newChatBtn.onclick = () => vscode.postMessage({ type: 'newChat' });
+    closeBtn.onclick = () => vscode.postMessage({ type: 'closePanel' });
+    addContextBtn.onclick = () => vscode.postMessage({ type: 'pickFile' });
+    signInBtn.onclick = () => vscode.postMessage({ type: 'googleSignIn' });
+    
+    modelSelect.onchange = () => {
+      vscode.postMessage({ type: 'selectModel', modelId: modelSelect.value });
+    };
+    
+    // Message handler
+    window.addEventListener('message', event => {
+      const msg = event.data;
+      
+      if (msg.type === 'authState') {
+        if (msg.signedIn) {
+          loginOverlay.classList.add('hidden');
+        } else {
+          loginOverlay.classList.remove('hidden');
+        }
+      }
+      
+      if (msg.type === 'userMessage') {
+        addMessage('YOU', msg.message, 'user');
+      }
+      
+      if (msg.type === 'assistantMessage') {
+        addMessage('AI', msg.message, 'assistant');
+      }
+      
+      if (msg.type === 'loading') {
+        sendBtn.disabled = msg.isLoading;
+        input.disabled = msg.isLoading;
+        loadingBar.classList.toggle('active', msg.isLoading);
+      }
+      
+      if (msg.type === 'clearMessages') {
+        chat.innerHTML = '';
+      }
+      
+      if (msg.type === 'modelList') {
+        modelSelect.innerHTML = '';
+        msg.models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = m.label;
+          if (m.id === msg.activeModel) opt.selected = true;
+          modelSelect.appendChild(opt);
+        });
+      }
+    });
+    
+    function addMessage(label, text, cls) {
+      const msgDiv = document.createElement('div');
+      msgDiv.className = 'msg ' + cls;
+      
+      const header = document.createElement('div');
+      header.className = 'msg-header';
+      
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'msg-label';
+      labelSpan.textContent = label;
+      header.appendChild(labelSpan);
+      
+      const actions = document.createElement('div');
+      actions.className = 'msg-actions';
+      
+      const copyBtn = document.createElement('button');
+      copyBtn.textContent = '📋';
+      copyBtn.title = 'Copy';
+      copyBtn.onclick = () => {
+        vscode.postMessage({ type: 'copyCode', code: text });
+        copyBtn.textContent = '✓';
+        setTimeout(() => copyBtn.textContent = '📋', 1000);
+      };
+      actions.appendChild(copyBtn);
+      
+      header.appendChild(actions);
+      
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = text;
+      
+      msgDiv.appendChild(header);
+      msgDiv.appendChild(bubble);
+      chat.appendChild(msgDiv);
+      chat.scrollTop = chat.scrollHeight;
+    }
+  </script>
+</body>
+</html>
