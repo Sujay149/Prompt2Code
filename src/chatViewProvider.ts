@@ -2458,6 +2458,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   .google-btn:hover { opacity: 0.92; transform: translateY(-1px); }
   .google-btn:active { transform: translateY(0); }
+  .google-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+  }
   .google-btn .g-icon {
     width: 20px;
     height: 20px;
@@ -2510,6 +2515,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     opacity: 0.3;
     cursor: not-allowed;
   }
+  
+  /* Responsive Design */
+  @media (max-width: 400px) {
+    .header { padding: 10px 12px; }
+    .sessions-section { max-height: 140px; }
+    .chat { padding: 12px; }
+    .msg { margin-bottom: 16px; }
+    .bubble { font-size: 12px; padding: 8px 10px; }
+    .toolbar-left { flex-wrap: wrap; gap: 4px; }
+    .toolbar-select { font-size: 11px; padding: 3px 6px; }
+  }
+  @media (max-width: 300px) {
+    .toolbar-left { width: 100%; }
+    .toolbar-select { flex: 1; min-width: 0; }
+  }
 </style>
 </head>
 
@@ -2553,14 +2573,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="attached-files" id="attachedFiles"></div>
   <div class="chat-input-wrapper">
     <div class="chat-input-container">
-      <div class="mode-selector-compact">
-        <div class="mode-tabs">
-          <button class="mode-tab" data-mode="ask" title="Ask questions about code">Ask</button>
-          <button class="mode-tab active" data-mode="agent" title="Edit code, create files">Agent</button>
-          <button class="mode-tab" data-mode="plan" title="Plan before implementing">Plan</button>
-        </div>
-        <span class="mode-hint-text" id="modeHint">Auto-edits files & creates code</span>
-      </div>
       <button class="add-context-btn-inner" id="addContextBtn">
         <span class="icon">📎</span>
         <span>Add Context...</span>
@@ -2577,12 +2589,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <button class="toolbar-btn" id="addImage" title="Upload UI screenshot">
             <span class="icon">🖼</span>
           </button>
+          <select class="toolbar-select" id="modeSelect">
+            <option value="ask">Ask</option>
+            <option value="agent" selected>Agent</option>
+            <option value="plan">Plan</option>
+          </select>
           <select class="toolbar-select" id="modelSelect">
             <option>Loading…</option>
           </select>
-          <button class="toolbar-btn" id="moreOptions" title="More options">
-            <span class="icon">⚙️</span>
-          </button>
         </div>
         <button id="send" class="toolbar-send-btn" title="Send" aria-label="Send">
           <span class="send-icon" aria-hidden="true">
@@ -2612,7 +2626,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const typingIndicator = document.getElementById('typingIndicator');
   const attachedFilesEl = document.getElementById('attachedFiles');
   const modelSelect = document.getElementById('modelSelect');
-  const moreOptions = document.getElementById('moreOptions');
+  const modeSelect = document.getElementById('modeSelect');
 
   // ── Auth elements ──
   const loginOverlay = document.getElementById('loginOverlay');
@@ -2622,39 +2636,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const userName = document.getElementById('userName');
   const signOutBtn = document.getElementById('signOutBtn');
 
-  googleSignInBtn.onclick = () => {
-    googleSignInBtn.disabled = true;
-    googleSignInBtn.textContent = 'Opening browser…';
-    vscode.postMessage({ type: 'googleSignIn' });
-    // Re-enable after 5 s in case user closes the tab
-    setTimeout(() => { googleSignInBtn.disabled = false; googleSignInBtn.innerHTML = '<span class="g-icon">G</span> Sign in with Google'; }, 5000);
-  };
-  signOutBtn.onclick = () => {
-    signOutBtn.disabled = true;
-    signOutBtn.textContent = '⏳ Signing out...';
-    vscode.postMessage({ type: 'googleSignOut' });
-    // Re-enable after 3s in case user cancels
-    setTimeout(() => { signOutBtn.disabled = false; signOutBtn.textContent = '🚪 Sign out'; }, 3000);
-  };
+  if (googleSignInBtn) {
+    googleSignInBtn.onclick = () => {
+      console.log('Sign in button clicked');
+      googleSignInBtn.disabled = true;
+      googleSignInBtn.textContent = 'Opening browser…';
+      vscode.postMessage({ type: 'googleSignIn' });
+      // Re-enable after 5 s in case user closes the tab
+      setTimeout(() => { 
+        googleSignInBtn.disabled = false; 
+        googleSignInBtn.innerHTML = '<span class="g-icon">G</span> Sign in with Google'; 
+      }, 5000);
+    };
+    console.log('Sign in button handler attached');
+  } else {
+    console.error('googleSignInBtn not found in DOM');
+  }
+  
+  if (signOutBtn) {
+    signOutBtn.onclick = () => {
+      signOutBtn.disabled = true;
+      signOutBtn.textContent = '⏳ Signing out...';
+      vscode.postMessage({ type: 'googleSignOut' });
+      // Re-enable after 3s in case user cancels
+      setTimeout(() => { 
+        signOutBtn.disabled = false; 
+        signOutBtn.textContent = '🚪 Sign out'; 
+      }, 3000);
+    };
+  }
 
   function applyAuthState(signedIn, user) {
     if (signedIn && user) {
-      loginOverlay.classList.add('hidden');
-      userBar.classList.remove('hidden');
-      userAvatar.src = user.picture || '';
-      userName.textContent = user.name || user.email || 'User';
+      if (loginOverlay) loginOverlay.classList.add('hidden');
+      if (userBar) userBar.classList.remove('hidden');
+      if (userAvatar) userAvatar.src = user.picture || '';
+      if (userName) userName.textContent = user.name || user.email || 'User';
     } else {
       loginOverlay.classList.remove('hidden');
       userBar.classList.add('hidden');
-        position: relative;
-        overflow: hidden;
-      }
-      .toolbar-send-btn .send-icon {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 20px;
-        height: 20px;
     }
   }
 
@@ -2701,34 +2721,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     reader.readAsDataURL(file);
   });
 
-  const modeHints = {
-    ask: 'Explains code — no file edits',
-    agent: 'Auto-edits files & creates code',
-    plan: 'Creates a plan before implementing'
-  };
+  // ── Mode selector (dropdown) ──
+  const modeSelect = document.getElementById('modeSelect');
+  
+  modeSelect.addEventListener('change', () => {
+    const mode = modeSelect.value;
+    if (mode === currentMode) return;
+    currentMode = mode;
+    vscode.postMessage({ type: 'setMode', mode });
 
-  // ── Mode selector ──
-  const modeTabs = document.querySelectorAll('.mode-tab');
-  const modeHint = document.getElementById('modeHint');
-
-  modeTabs.forEach(btn => {
-    btn.addEventListener('click', () => {
-      const mode = btn.dataset.mode;
-      if (mode === currentMode) return;
-      currentMode = mode;
-      modeTabs.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      modeHint.textContent = modeHints[mode] || '';
-      vscode.postMessage({ type: 'setMode', mode });
-
-      // Update placeholder
-      const placeholders = {
-        ask: 'Ask a question about your code',
-        agent: 'Describe what to build next',
-        plan: 'Describe what you want to build'
-      };
-      input.placeholder = placeholders[mode] || placeholders.agent;
-    });
+    // Update placeholder
+    const placeholders = {
+      ask: 'Ask a question about your code',
+      agent: 'Describe what to build next',
+      plan: 'Describe what you want to build'
+    };
+    input.placeholder = placeholders[mode] || placeholders.agent;
   });
 
   // ── Tracked / attached files state ──
@@ -2798,8 +2806,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ type: 'pickFile' });
   };
 
-  moreOptions.onclick = () => {
-    // Could open settings or show more options in the future
+  settingsBtn.onclick = () => {
     vscode.postMessage({ type: 'showOptions' });
   };
 
@@ -2851,10 +2858,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (msg.type === 'error') add('Error', msg.message, 'assistant');
     if (msg.type === 'modeChanged') {
       currentMode = msg.mode;
-      modeBtns.forEach(b => {
-        b.classList.toggle('active', b.dataset.mode === msg.mode);
-      });
-      modeHint.textContent = modeHints[msg.mode] || '';
+      modeSelect.value = msg.mode;
     }
     if (msg.type === 'planMessage') {
       // Show plan with execute button
