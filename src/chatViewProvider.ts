@@ -104,6 +104,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.clearConversation();
           break;
 
+        case 'newChat':
+          this.startNewChat();
+          break;
+
+        case 'closePanel':
+          this.closePanel();
+          break;
+
         case 'insertCode':
           this.insertCodeToEditor(data.code);
           break;
@@ -189,9 +197,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         case 'googleSignOut': {
           if (this.authProvider) {
-            await this.authProvider.signOut();
-            vscode.window.showInformationMessage('Signed out of Prompt2Code');
-            await this.sendAuthStateToWebview();
+            // Ask for confirmation
+            const choice = await vscode.window.showWarningMessage(
+              'Sign out of Prompt2Code?',
+              { modal: true },
+              'Sign Out',
+              'Sign Out & Clear History'
+            );
+
+            if (choice) {
+              await this.authProvider.signOut();
+              
+              // Clear chat history if requested
+              if (choice === 'Sign Out & Clear History') {
+                this.conversationHistory = [];
+                this._view?.webview.postMessage({ type: 'clearMessages' });
+              }
+              
+              vscode.window.showInformationMessage('Successfully signed out of Prompt2Code');
+              await this.sendAuthStateToWebview();
+            }
           }
           break;
         }
@@ -1849,9 +1874,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private clearConversation() {
+  public clearConversation() {
     this.conversationHistory = [];
     this._view?.webview.postMessage({ type: 'clearMessages' });
+  }
+
+  /** Start a new chat session (like Copilot's new chat feature). */
+  public startNewChat() {
+    this.conversationHistory = [];
+    this._view?.webview.postMessage({ type: 'clearMessages' });
+    vscode.window.showInformationMessage('Started new chat session');
+  }
+
+  /** Close the chat panel. */
+  public closePanel() {
+    // Hide the webview panel (similar to Copilot)
+    if (this._view) {
+      // In VS Code, we can't directly close a webview view, but we can hide it
+      // by collapsing the sidebar or using the command to focus elsewhere
+      vscode.commands.executeCommand('workbench.action.closeSidebar');
+    }
   }
 
   private insertCodeToEditor(code: string) {
@@ -1907,6 +1949,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     border-bottom: 1px solid var(--vscode-panel-border);
   }
   .header-actions { display: flex; gap: 6px; }
+  #newChat {
+    padding: 6px 12px;
+    font-size: 12px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  #newChat:hover { opacity: 0.9; }
+  #close {
+    padding: 4px 8px;
+    font-size: 18px;
+    line-height: 1;
+    background: transparent;
+    color: var(--vscode-foreground);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  #close:hover {
+    opacity: 1;
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
+  }
   .chat {
     flex: 1;
     overflow-y: auto;
@@ -2010,64 +2079,158 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   .btn-discard:hover { opacity: 0.9; }
   /* ── Copilot-style chat input ── */
   .chat-input-wrapper {
-    padding: 10px;
+    padding: 12px;
     border-top: 1px solid var(--vscode-panel-border);
     background: var(--vscode-sideBar-background);
   }
-  .chat-input {
+  .chat-input-container {
     display: flex;
-    align-items: flex-end;
-    gap: 6px;
-    padding: 6px;
-    border-radius: 10px;
-    background: var(--vscode-editor-background);
-    border: 1px solid var(--vscode-panel-border);
+    flex-direction: column;
+    border-radius: 8px;
+    background: var(--vscode-input-background, var(--vscode-editor-background));
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
     transition: border-color 0.15s;
+    overflow: hidden;
   }
-  .chat-input:focus-within {
+  .chat-input-container:focus-within {
     border-color: var(--vscode-focusBorder);
   }
-  .chat-input textarea {
-    flex: 1;
+  .mode-selector-compact {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-input-background, var(--vscode-editor-background));
+  }
+  .mode-tabs {
+    display: flex;
+    gap: 2px;
+  }
+  .mode-tab {
+    padding: 4px 10px;
+    font-size: 12px;
+    background: transparent;
+    border: none;
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    border-radius: 4px;
+    opacity: 0.6;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  .mode-tab:hover {
+    opacity: 0.85;
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.05));
+  }
+  .mode-tab.active {
+    opacity: 1;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    font-weight: 500;
+  }
+  .mode-hint-text {
+    font-size: 10px;
+    opacity: 0.5;
+  }
+  .add-context-btn-inner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--vscode-panel-border);
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    font-size: 12px;
+    text-align: left;
+    transition: background 0.15s;
+    width: 100%;
+  }
+  .add-context-btn-inner:hover {
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.03));
+  }
+  .add-context-btn-inner .icon {
+    font-size: 14px;
+    opacity: 0.7;
+  }
+  .chat-input-area {
+    padding: 10px 12px;
+  }
+  .chat-input-area {
+    padding: 10px 12px;
+  }
+  .chat-input-area textarea {
+    width: 100%;
     resize: none;
-    min-height: 28px;
+    min-height: 32px;
     max-height: 140px;
-    padding: 6px 8px;
+    padding: 0;
     border: none;
     outline: none;
     background: transparent;
     color: var(--vscode-foreground);
     font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    line-height: 1.4;
+    font-size: 13px;
+    line-height: 1.5;
     overflow-y: auto;
   }
-  .chat-input textarea::placeholder {
+  .chat-input-area textarea::placeholder {
+    color: var(--vscode-input-placeholderForeground);
+    opacity: 0.6;
+  }
+  .chat-input-area textarea:disabled {
     opacity: 0.5;
   }
-  .chat-input textarea:disabled {
-    opacity: 0.5;
-  }
-  .icon-btn {
-    width: 28px;
-    height: 28px;
-    min-width: 28px;
-    border-radius: 6px;
-    border: none;
-    background: var(--vscode-button-secondaryBackground, #3a3d41);
-    color: var(--vscode-button-secondaryForeground, #fff);
-    cursor: pointer;
-    font-size: 16px;
+  .chat-input-toolbar {
     display: flex;
     align-items: center;
-    justify-content: center;
-    padding: 0;
-    flex-shrink: 0;
-    transition: background 0.15s;
+    gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-input-background, var(--vscode-editor-background));
   }
-  .icon-btn:hover {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
+  .toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+  }
+  .toolbar-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    font-size: 13px;
+    opacity: 0.7;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  .toolbar-btn:hover {
+    opacity: 1;
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
+  }
+  .toolbar-btn .icon {
+    font-size: 16px;
+  }
+  .toolbar-select {
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    font-size: 13px;
+    opacity: 0.85;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  .toolbar-select:hover {
+    opacity: 1;
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
   }
   .image-preview-bar {
     display: flex;
@@ -2105,11 +2268,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     opacity: 1;
     background: var(--vscode-button-secondaryBackground);
   }
-  .send-btn {
+  .toolbar-send-btn {
     width: 32px;
     height: 32px;
     min-width: 32px;
-    border-radius: 8px;
+    border-radius: 6px;
     border: none;
     background: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
@@ -2119,15 +2282,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     align-items: center;
     justify-content: center;
     padding: 0;
-    flex-shrink: 0;
-    transition: opacity 0.15s, background 0.15s;
+    transition: opacity 0.15s;
   }
-  .send-btn:hover {
+  .toolbar-send-btn:hover {
     opacity: 0.9;
   }
-  .send-btn:disabled {
-    opacity: 0.35;
+  .toolbar-send-btn:disabled {
+    opacity: 0.3;
     cursor: not-allowed;
+    background: var(--vscode-button-secondaryBackground);
   }
   button {
     padding: 8px 14px;
@@ -2216,95 +2379,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     line-height: 1;
   }
   .file-chip .remove:hover { opacity: 1; }
-  /* ── Model selector ── */
-  .model-selector-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border-top: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-sideBar-background);
-  }
-  .model-selector-bar label {
-    font-size: 11px;
-    opacity: 0.7;
-    white-space: nowrap;
-  }
-  .model-selector-bar select {
-    flex: 1;
-    min-width: 0;
-    padding: 3px 6px;
-    font-size: 11px;
-    font-family: var(--vscode-font-family);
-    color: var(--vscode-foreground);
-    background: var(--vscode-dropdown-background, var(--vscode-input-background));
-    border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
-    border-radius: 4px;
-    outline: none;
-    cursor: pointer;
-    appearance: auto;
-  }
-  .model-selector-bar select:focus {
-    border-color: var(--vscode-focusBorder);
-  }
-  .model-selector-bar .model-ctx {
-    font-size: 10px;
-    opacity: 0.5;
-    white-space: nowrap;
-  }
-  /* ── Mode selector (Copilot-style) ── */
-  .mode-selector {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    padding: 6px 10px;
-    border-top: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-sideBar-background);
-  }
-  .mode-btn {
-    padding: 4px 12px;
-    font-size: 11px;
-    font-family: var(--vscode-font-family);
-    color: var(--vscode-foreground);
-    background: transparent;
-    border: 1px solid var(--vscode-panel-border);
-    cursor: pointer;
-    transition: all 0.15s;
-    opacity: 0.6;
-    white-space: nowrap;
-  }
-  .mode-btn:first-child {
-    border-radius: 4px 0 0 4px;
-  }
-  .mode-btn:last-child {
-    border-radius: 0 4px 4px 0;
-  }
-  .mode-btn:not(:first-child) {
-    border-left: none;
-  }
-  .mode-btn:hover {
-    opacity: 0.85;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.07));
-  }
-  .mode-btn.active {
-    opacity: 1;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border-color: var(--vscode-button-background);
-    font-weight: 600;
-  }
-  .mode-btn .mode-icon {
-    margin-right: 4px;
-    font-size: 12px;
-  }
-  .mode-hint {
-    margin-left: 8px;
-    font-size: 10px;
-    opacity: 0.45;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   /* ── Plan execute button ── */
   .plan-actions {
     display: flex;
@@ -2426,10 +2500,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     font-size: 11px;
     padding: 2px 6px;
     border-radius: 3px;
+    transition: all 0.2s;
   }
   .user-bar .sign-out-btn:hover {
     opacity: 1;
     background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
+  }
+  .user-bar .sign-out-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
   }
 </style>
 </head>
@@ -2449,14 +2528,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="user-bar hidden" id="userBar">
     <img id="userAvatar" src="" alt="" />
     <span class="user-name" id="userName"></span>
-    <button class="sign-out-btn" id="signOutBtn">Sign out</button>
+    <button class="sign-out-btn" id="signOutBtn">🚪 Sign out</button>
   </div>
 
   <div class="header">
     <strong>Prompt2Code</strong>
     <div class="header-actions">
-      <button id="attach" title="Include a workspace file (@file)">📎</button>
-      <button id="clear" title="Clear conversation">Clear </button>
+      <button id="newChat" title="Start a new chat">+</button>
+      <button id="close" title="Close panel">×</button>
     </div>
   </div>
 
@@ -2472,26 +2551,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   <div class="typing" id="typingIndicator">⏳ Working… generating code in the editor</div>
   <div class="attached-files" id="attachedFiles"></div>
-  <div class="mode-selector">
-    <button class="mode-btn" data-mode="ask" title="Ask questions about code"><span class="mode-icon"></span>Ask</button>
-    <button class="mode-btn active" data-mode="agent" title="Edit code, create files"><span class="mode-icon"></span>Agent</button>
-    <button class="mode-btn" data-mode="plan" title="Plan before implementing"><span class="mode-icon"></span>Plan</button>
-    <span class="mode-hint" id="modeHint">Auto-edits files & creates code</span>
-  </div>
-  <div class="model-selector-bar">
-    <label>Model:</label>
-    <select id="modelSelect"><option>Loading…</option></select>
-    <span class="model-ctx" id="modelCtx"></span>
-  </div>
   <div class="chat-input-wrapper">
-    <div id="imagePreview" style="display:none"></div>
-    <div class="chat-input">
-      <button id="addFile" class="icon-btn" title="Add file to context">+</button>
-      <button id="addImage" class="icon-btn" title="Upload UI screenshot for code generation">🖼</button>
-      <input type="file" id="imageInput" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" />
-      <textarea id="input" rows="1" placeholder="Ask Prompt2Code… (use @file or @workspace)"></textarea>
-      <button id="send" class="send-btn" title="Send">&#10148;</button>
+    <div class="chat-input-container">
+      <div class="mode-selector-compact">
+        <div class="mode-tabs">
+          <button class="mode-tab" data-mode="ask" title="Ask questions about code">Ask</button>
+          <button class="mode-tab active" data-mode="agent" title="Edit code, create files">Agent</button>
+          <button class="mode-tab" data-mode="plan" title="Plan before implementing">Plan</button>
+        </div>
+        <span class="mode-hint-text" id="modeHint">Auto-edits files & creates code</span>
+      </div>
+      <button class="add-context-btn-inner" id="addContextBtn">
+        <span class="icon">📎</span>
+        <span>Add Context...</span>
+      </button>
+      <div class="chat-input-area">
+        <textarea id="input" rows="1" placeholder="Describe what to build next"></textarea>
+      </div>
+      <div id="imagePreview" style="display:none"></div>
+      <div class="chat-input-toolbar">
+        <div class="toolbar-left">
+          <button class="toolbar-btn" id="addFile" title="Add file to context">
+            <span class="icon">📄</span>
+          </button>
+          <button class="toolbar-btn" id="addImage" title="Upload UI screenshot">
+            <span class="icon">🖼</span>
+          </button>
+          <select class="toolbar-select" id="modelSelect">
+            <option>Loading…</option>
+          </select>
+          <button class="toolbar-btn" id="moreOptions" title="More options">
+            <span class="icon">⚙️</span>
+          </button>
+        </div>
+        <button id="send" class="toolbar-send-btn" title="Send" aria-label="Send">
+          <span class="send-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M3 17L17 10L3 3V8.5L13 10L3 11.5V17Z" fill="currentColor"/>
+            </svg>
+          </span>
+        </button>
+      </div>
     </div>
+    <input type="file" id="imageInput" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" />
   </div>
 
 <script nonce="${nonce}">
@@ -2499,8 +2601,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const chat = document.getElementById('chat');
   const input = document.getElementById('input');
   const send = document.getElementById('send');
-  const clear = document.getElementById('clear');
-  const attach = document.getElementById('attach');
+  const newChat = document.getElementById('newChat');
+  const close = document.getElementById('close');
+  const addContextBtn = document.getElementById('addContextBtn');
   const addFile = document.getElementById('addFile');
   const addImage = document.getElementById('addImage');
   const imageInput = document.getElementById('imageInput');
@@ -2509,7 +2612,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const typingIndicator = document.getElementById('typingIndicator');
   const attachedFilesEl = document.getElementById('attachedFiles');
   const modelSelect = document.getElementById('modelSelect');
-  const modelCtx = document.getElementById('modelCtx');
+  const moreOptions = document.getElementById('moreOptions');
 
   // ── Auth elements ──
   const loginOverlay = document.getElementById('loginOverlay');
@@ -2526,7 +2629,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Re-enable after 5 s in case user closes the tab
     setTimeout(() => { googleSignInBtn.disabled = false; googleSignInBtn.innerHTML = '<span class="g-icon">G</span> Sign in with Google'; }, 5000);
   };
-  signOutBtn.onclick = () => { vscode.postMessage({ type: 'googleSignOut' }); };
+  signOutBtn.onclick = () => {
+    signOutBtn.disabled = true;
+    signOutBtn.textContent = '⏳ Signing out...';
+    vscode.postMessage({ type: 'googleSignOut' });
+    // Re-enable after 3s in case user cancels
+    setTimeout(() => { signOutBtn.disabled = false; signOutBtn.textContent = '🚪 Sign out'; }, 3000);
+  };
 
   function applyAuthState(signedIn, user) {
     if (signedIn && user) {
@@ -2537,6 +2646,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } else {
       loginOverlay.classList.remove('hidden');
       userBar.classList.add('hidden');
+        position: relative;
+        overflow: hidden;
+      }
+      .toolbar-send-btn .send-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
     }
   }
 
@@ -2590,24 +2708,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   };
 
   // ── Mode selector ──
-  const modeBtns = document.querySelectorAll('.mode-btn');
+  const modeTabs = document.querySelectorAll('.mode-tab');
   const modeHint = document.getElementById('modeHint');
 
-  modeBtns.forEach(btn => {
+  modeTabs.forEach(btn => {
     btn.addEventListener('click', () => {
       const mode = btn.dataset.mode;
       if (mode === currentMode) return;
       currentMode = mode;
-      modeBtns.forEach(b => b.classList.remove('active'));
+      modeTabs.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       modeHint.textContent = modeHints[mode] || '';
       vscode.postMessage({ type: 'setMode', mode });
 
       // Update placeholder
       const placeholders = {
-        ask: 'Ask about your code… (no file edits)',
-        agent: 'Ask Prompt2Code… (use @file or @workspace)',
-        plan: 'Describe what you want to build…'
+        ask: 'Ask a question about your code',
+        agent: 'Describe what to build next',
+        plan: 'Describe what you want to build'
       };
       input.placeholder = placeholders[mode] || placeholders.agent;
     });
@@ -2654,7 +2772,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       imagePreview.innerHTML = '';
       imagePreview.style.display = 'none';
       imageInput.value = '';
-      input.placeholder = 'Ask Prompt2Code\u2026 (use @file or @workspace)';
+      input.placeholder = 'Describe what to build next';
       return;
     }
 
@@ -2664,16 +2782,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     input.value = '';
   };
 
-  clear.onclick = () => {
-    vscode.postMessage({ type: 'clearChat' });
+  newChat.onclick = () => {
+    vscode.postMessage({ type: 'newChat' });
   };
 
-  attach.onclick = () => {
+  close.onclick = () => {
+    vscode.postMessage({ type: 'closePanel' });
+  };
+
+  addContextBtn.onclick = () => {
     vscode.postMessage({ type: 'pickFile' });
   };
 
   addFile.onclick = () => {
     vscode.postMessage({ type: 'pickFile' });
+  };
+
+  moreOptions.onclick = () => {
+    // Could open settings or show more options in the future
+    vscode.postMessage({ type: 'showOptions' });
   };
 
   // Model selector
@@ -2770,15 +2897,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (m.id === msg.activeModel) { opt.selected = true; }
         modelSelect.appendChild(opt);
       }
-      // Show ctx window for the current model
-      const cur = availableModels.find(m => m.id === msg.activeModel);
-      modelCtx.textContent = cur ? cur.ctx + ' context' : '';
     }
     if (msg.type === 'modelChangeResult') {
       if (msg.success) {
         modelSelect.value = msg.activeModel;
-        const cur = availableModels.find(m => m.id === msg.activeModel);
-        modelCtx.textContent = cur ? cur.ctx + ' context' : '';
       } else {
         // Revert the dropdown to the active model
         const cur = availableModels.find(m => m.id === msg.activeModel);

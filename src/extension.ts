@@ -50,8 +50,23 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
     vscode.commands.registerCommand('prompt2code.signOut', async () => {
-      await authProvider.signOut();
-      vscode.window.showInformationMessage('Signed out of Prompt2Code');
+      const choice = await vscode.window.showWarningMessage(
+        'Sign out of Prompt2Code?',
+        { modal: true },
+        'Sign Out',
+        'Sign Out & Clear History'
+      );
+
+      if (choice) {
+        await authProvider.signOut();
+        
+        // Clear chat history if requested
+        if (choice === 'Sign Out & Clear History') {
+          chatViewProvider.clearConversation();
+        }
+        
+        vscode.window.showInformationMessage('Successfully signed out of Prompt2Code');
+      }
     })
   );
 

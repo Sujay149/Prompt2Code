@@ -138,7 +138,11 @@ export class GoogleAuthProvider {
 
       const actualPort = 8080; // Fixed port for Google OAuth redirect
 
+      // eslint-disable-next-line prefer-const
+      let timer: NodeJS.Timeout;
+
       const cleanup = () => {
+        if (timer) { clearTimeout(timer); }
         try { server.close(); } catch { /* already closed */ }
       };
 
@@ -169,8 +173,8 @@ export class GoogleAuthProvider {
         resolve(null);
       });
 
-      // Timeout after 2 minutes
-      const timer = setTimeout(() => {
+      // Timeout after 2 minutes'
+      timer = setTimeout(() => {
         cleanup();
         resolve(null);
       }, 120_000);
@@ -180,6 +184,21 @@ export class GoogleAuthProvider {
   /* ── Sign-out ── */
 
   async signOut(): Promise<void> {
+    // Revoke the token with Google for security
+    const accessToken = await this.context.secrets.get('prompt2code.googleAccessToken');
+    if (accessToken) {
+      try {
+        await axios.post('https://oauth2.googleapis.com/revoke', null, {
+          params: { token: accessToken },
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
+      } catch (err) {
+        console.warn('Failed to revoke token with Google:', err);
+        // Continue with local cleanup even if revocation fails
+      }
+    }
+
+    // Clear local storage
     await this.context.secrets.delete('prompt2code.googleAccessToken');
     await this.context.secrets.delete('prompt2code.googleRefreshToken');
     await this.context.globalState.update('prompt2code.googleUserInfo', undefined);
