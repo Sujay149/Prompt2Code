@@ -47,10 +47,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   /** Push current auth state (signed-in / signed-out) to the webview. */
   private async sendAuthStateToWebview() {
-    if (!this._view) { return; }
-    const signedIn = this.authProvider ? await this.authProvider.isAuthenticated() : false;
-    const user = signedIn ? await this.authProvider?.getUserInfo() ?? null : null;
-    this._view.webview.postMessage({ type: 'authState', signedIn, user });
+    if (!this._view) { 
+      console.log('⚠️ sendAuthStateToWebview: no webview available');
+      return; 
+    }
+    
+    if (!this.authProvider) {
+      console.log('⚠️ sendAuthStateToWebview: no auth provider');
+      this._view.webview.postMessage({ type: 'authState', signedIn: false, user: null });
+      return;
+    }
+
+    try {
+      const signedIn = await this.authProvider.isAuthenticated();
+      const user = signedIn ? await this.authProvider.getUserInfo() : null;
+      
+      console.log('📤 Sending auth state to webview:', { signedIn, user: user ? user.email : null });
+      
+      this._view.webview.postMessage({ 
+        type: 'authState', 
+        signedIn, 
+        user 
+      });
+    } catch (error) {
+      console.error('❌ Error getting auth state:', error);
+      this._view.webview.postMessage({ type: 'authState', signedIn: false, user: null });
+    }
   }
 
   public resolveWebviewView(
@@ -85,13 +107,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Send available models + current selection to webview
     this.sendModelListToWebview();
 
-    // Send auth state on first render
-    this.sendAuthStateToWebview();
+    // Re-send auth state whenever the view becomes visible again
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) {
+        console.log('👁️ Webview became visible, re-sending auth state');
+        this.sendAuthStateToWebview();
+      }
+    });
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
       console.log('Webview → Extension:', data);
-
       switch (data.type) {
+        case 'webviewReady': {
+          console.log('✅ Webview reported ready, sending initial state');
+          this.sendModelListToWebview();
+          await this.sendAuthStateToWebview();
+          break;
+        }
+
         case 'sendMessage':
           await this.handleUserMessage(data.message, data.attachedFiles || []);
           break;
@@ -183,15 +216,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         case 'googleSignIn': {
+          console.log('🔐 Extension received googleSignIn request');
           if (this.authProvider) {
-            const user = await this.authProvider.signIn();
-            if (user) {
-              vscode.window.showInformationMessage(`Signed in as ${user.name} (${user.email})`);
-            } else {
-              vscode.window.showWarningMessage('Google Sign-In was cancelled or failed.');
+            try {
+              const user = await this.authProvider.signIn();
+              console.log('🔐 Sign-in result:', user ? 'SUCCESS' : 'CANCELLED');
+              
+              if (user) {
+                vscode.window.showInformationMessage(`✅ Signed in as ${user.name || user.email}`);
+                // Send auth state DIRECTLY with the user data we already have
+                // This avoids any async storage timing issues
+                this._view?.webview.postMessage({ type: 'authState', signedIn: true, user });
+              } else {
+                vscode.window.showWarningMessage('Google Sign-In was cancelled.');
+                this._view?.webview.postMessage({ type: 'authState', signedIn: false, user: null });
+              }
+              
+              // Also send via the standard method as backup
+              await this.sendAuthStateToWebview();
+            } catch (error: any) {
+              console.error('❌ Sign-in error:', error);
+              vscode.window.showErrorMessage(`Sign-in failed: ${error.message}`);
+              this._view?.webview.postMessage({ type: 'authState', signedIn: false, user: null });
             }
-            await this.sendAuthStateToWebview();
+          } else {
+            console.error('❌ Auth provider not initialized');
+            vscode.window.showErrorMessage('Authentication system not initialized');
           }
+          break;
+        }
+
+        case 'requestAuthState': {
+          console.log('🔄 Webview requested auth state refresh');
+          await this.sendAuthStateToWebview();
           break;
         }
 
@@ -1951,9 +2008,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   .header-actions { display: flex; gap: 6px; }
   #newChat {
     padding: 6px 12px;
-    font-size: 12px;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
+    font-size: 20px;
+    font-weight: bold;
+    background: transparent;
+    color: var(--vscode-foreground);
     border: none;
     border-radius: 4px;
     cursor: pointer;
@@ -2232,6 +2290,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     opacity: 1;
     background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
   }
+  .toolbar-select option {
+    background: #1e1e1e;
+    color: var(--vscode-foreground);
+  }
   .image-preview-bar {
     display: flex;
     align-items: center;
@@ -2274,8 +2336,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     min-width: 32px;
     border-radius: 6px;
     border: none;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
+    background: transparent;
+    color: var(--vscode-foreground);
     cursor: pointer;
     font-size: 16px;
     display: flex;
@@ -2290,7 +2352,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   .toolbar-send-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
-    background: var(--vscode-button-secondaryBackground);
   }
   button {
     padding: 8px 14px;
@@ -2424,7 +2485,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     padding: 24px;
     text-align: center;
   }
-  .login-overlay.hidden { display: none; }
+  .login-overlay.hidden { display: none !important; }
   .login-overlay .logo {
     font-size: 36px;
     margin-bottom: 4px;
@@ -2482,7 +2543,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     font-size: 12px;
     border-bottom: 1px solid var(--vscode-panel-border);
   }
-  .user-bar.hidden { display: none; }
+  .user-bar.hidden { display: none !important; }
   .user-bar img {
     width: 22px;
     height: 22px;
@@ -2548,7 +2609,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="user-bar hidden" id="userBar">
     <img id="userAvatar" src="" alt="" />
     <span class="user-name" id="userName"></span>
-    <button class="sign-out-btn" id="signOutBtn">🚪 Sign out</button>
+    <button class="sign-out-btn" id="signOutBtn"> Sign out</button>
   </div>
 
   <div class="header">
@@ -2583,9 +2644,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <div id="imagePreview" style="display:none"></div>
       <div class="chat-input-toolbar">
         <div class="toolbar-left">
-          <button class="toolbar-btn" id="addFile" title="Add file to context">
-            <span class="icon">📄</span>
-          </button>
+          
           <button class="toolbar-btn" id="addImage" title="Upload UI screenshot">
             <span class="icon">🖼</span>
           </button>
@@ -2611,7 +2670,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   </div>
 
 <script nonce="${nonce}">
+  console.log('🚀 Prompt2Code webview script loaded');
+  
   const vscode = acquireVsCodeApi();
+
+  // ══════════════════════════════════════════════
+  // REGISTER MESSAGE LISTENER FIRST — before anything else
+  // so we never miss messages from the extension
+  // ══════════════════════════════════════════════
+  const _pendingMessages = [];
+  window.addEventListener('message', event => {
+    const msg = event.data;
+    if (typeof _handleMessage === 'function') {
+      _handleMessage(msg);
+    } else {
+      _pendingMessages.push(msg);
+    }
+  });
+
   const chat = document.getElementById('chat');
   const input = document.getElementById('input');
   const send = document.getElementById('send');
@@ -2636,45 +2712,127 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const userName = document.getElementById('userName');
   const signOutBtn = document.getElementById('signOutBtn');
 
+  // Current auth state
+  let isSignedIn = false;
+  let currentUser = null;
+
+  // Sign in button handler
   if (googleSignInBtn) {
-    googleSignInBtn.onclick = () => {
-      console.log('Sign in button clicked');
+    googleSignInBtn.addEventListener('click', () => {
+      console.log('🔐 Sign in button clicked');
       googleSignInBtn.disabled = true;
       googleSignInBtn.textContent = 'Opening browser…';
+      
       vscode.postMessage({ type: 'googleSignIn' });
-      // Re-enable after 5 s in case user closes the tab
-      setTimeout(() => { 
-        googleSignInBtn.disabled = false; 
-        googleSignInBtn.innerHTML = '<span class="g-icon">G</span> Sign in with Google'; 
-      }, 5000);
-    };
-    console.log('Sign in button handler attached');
+      
+      // After sign-in completes, request fresh auth state
+      setTimeout(() => {
+        console.log('🔄 Requesting auth state refresh');
+        vscode.postMessage({ type: 'requestAuthState' });
+      }, 2000);
+      
+      // Re-enable after timeout in case of error
+      setTimeout(() => {
+        if (!isSignedIn) {
+          googleSignInBtn.disabled = false;
+          googleSignInBtn.innerHTML = '<span class="g-icon">G</span> Sign in with Google';
+        }
+      }, 10000);
+    });
+    console.log('✅ Sign in button handler attached');
   } else {
-    console.error('googleSignInBtn not found in DOM');
-  }
-  
-  if (signOutBtn) {
-    signOutBtn.onclick = () => {
-      signOutBtn.disabled = true;
-      signOutBtn.textContent = '⏳ Signing out...';
-      vscode.postMessage({ type: 'googleSignOut' });
-      // Re-enable after 3s in case user cancels
-      setTimeout(() => { 
-        signOutBtn.disabled = false; 
-        signOutBtn.textContent = '🚪 Sign out'; 
-      }, 3000);
-    };
+    console.error('❌ googleSignInBtn element not found in DOM!');
   }
 
+  // Sign out button handler
+  if (signOutBtn) {
+    signOutBtn.addEventListener('click', () => {
+      console.log(' Sign out button clicked');
+      signOutBtn.disabled = true;
+      signOutBtn.textContent = '⏳ Signing out...';
+      
+      vscode.postMessage({ type: 'googleSignOut' });
+      
+      setTimeout(() => {
+        signOutBtn.disabled = false;
+        signOutBtn.textContent = ' Sign out';
+      }, 3000);
+    });
+  }
+
+  // Apply auth state to UI
   function applyAuthState(signedIn, user) {
+    console.log('📋 applyAuthState called:', { 
+      signedIn, 
+      user, 
+      loginOverlayExists: !!loginOverlay,
+      userBarExists: !!userBar 
+    });
+    
+    isSignedIn = signedIn;
+    currentUser = user;
+
     if (signedIn && user) {
-      if (loginOverlay) loginOverlay.classList.add('hidden');
-      if (userBar) userBar.classList.remove('hidden');
-      if (userAvatar) userAvatar.src = user.picture || '';
-      if (userName) userName.textContent = user.name || user.email || 'User';
+      console.log('✅ User is signed in:', user.email || user.name);
+      
+      // Hide login overlay - use multiple methods to ensure it works
+      if (loginOverlay) {
+        console.log('  - Hiding login overlay');
+        loginOverlay.style.display = 'none';
+        loginOverlay.classList.add('hidden');
+        console.log('  - Login overlay display:', window.getComputedStyle(loginOverlay).display);
+      } else {
+        console.error('❌ loginOverlay element not found!');
+      }
+      
+      // Show user bar - use multiple methods to ensure it works
+      if (userBar) {
+        console.log('  - Showing user bar');
+        userBar.style.display = 'flex';
+        userBar.classList.remove('hidden');
+        console.log('  - User bar display:', window.getComputedStyle(userBar).display);
+      } else {
+        console.error('❌ userBar element not found!');
+      }
+      
+      // Set user info
+      if (userAvatar && user.picture) {
+        console.log('  - Setting avatar:', user.picture);
+        userAvatar.src = user.picture;
+        userAvatar.style.display = 'block';
+      }
+      if (userName) {
+        const displayName = user.name || user.email || 'User';
+        console.log('  - Setting user name:', displayName);
+        userName.textContent = displayName;
+      }
+      
+      // Reset sign-in button
+      if (googleSignInBtn) {
+        googleSignInBtn.disabled = false;
+        googleSignInBtn.innerHTML = '<span class="g-icon">G</span> Sign in with Google';
+      }
+      
+      console.log('✅ Auth UI update complete - user should be logged in');
+      
     } else {
-      loginOverlay.classList.remove('hidden');
-      userBar.classList.add('hidden');
+      console.log('❌ User is NOT signed in');
+      
+      // Show login overlay
+      if (loginOverlay) {
+        console.log('  - Showing login overlay');
+        loginOverlay.style.display = 'flex';
+        loginOverlay.classList.remove('hidden');
+      }
+      
+      // Hide user bar
+      if (userBar) {
+        console.log('  - Hiding user bar');
+        userBar.style.display = 'none';
+        userBar.classList.add('hidden');
+      }
+      
+      console.log('✅ Auth UI update complete - showing login screen');
     }
   }
 
@@ -2685,9 +2843,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // ── Image attachment state ──
   let pendingImage = null; // { base64, mimeType, fileName }
 
-  addImage.onclick = () => { imageInput.click(); };
+  if (addImage) addImage.onclick = () => { if (imageInput) imageInput.click(); };
 
-  imageInput.addEventListener('change', (e) => {
+  if (imageInput) imageInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
     if (file.size > 4 * 1024 * 1024) {
@@ -2722,8 +2880,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   });
 
   // ── Mode selector (dropdown) ──
-  const modeSelect = document.getElementById('modeSelect');
-  
   modeSelect.addEventListener('change', () => {
     const mode = modeSelect.value;
     if (mode === currentMode) return;
@@ -2744,6 +2900,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let trackedFiles = [];
 
   function renderChips() {
+    if (!attachedFilesEl) return;
     attachedFilesEl.innerHTML = '';
     for (const f of trackedFiles) {
       const chip = document.createElement('span');
@@ -2762,7 +2919,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  send.onclick = () => {
+  if (send) send.onclick = () => {
     if (loading) return;
 
     // If an image is attached, send as image message
@@ -2790,55 +2947,62 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     input.value = '';
   };
 
-  newChat.onclick = () => {
+  if (newChat) newChat.onclick = () => {
     vscode.postMessage({ type: 'newChat' });
   };
 
-  close.onclick = () => {
+  if (close) close.onclick = () => {
     vscode.postMessage({ type: 'closePanel' });
   };
 
-  addContextBtn.onclick = () => {
+  if (addContextBtn) addContextBtn.onclick = () => {
     vscode.postMessage({ type: 'pickFile' });
   };
 
-  addFile.onclick = () => {
+  if (addFile) addFile.onclick = () => {
     vscode.postMessage({ type: 'pickFile' });
-  };
-
-  settingsBtn.onclick = () => {
-    vscode.postMessage({ type: 'showOptions' });
   };
 
   // Model selector
-  modelSelect.onchange = () => {
+  if (modelSelect) modelSelect.onchange = () => {
     const selectedId = modelSelect.value;
     vscode.postMessage({ type: 'selectModel', modelId: selectedId });
   };
 
   // Auto-grow textarea (Copilot-like)
-  input.addEventListener('input', () => {
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 140) + 'px';
-  });
-
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send.click();
-      // Reset height after send
+  if (input) {
+    input.addEventListener('input', () => {
       input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+    });
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (send) send.click();
+        input.style.height = 'auto';
+      }
+    });
+  }
+
+  // ═══════════════════════════════════════════════
+  // Now define the real message handler and flush
+  // any messages that arrived before we were ready
+  // ═══════════════════════════════════════════════
+  function _handleMessage(msg) {
+    console.log('📨 Webview processing message:', msg.type);
+
+    if (msg.type === 'authState') { 
+      console.log('🔐 Processing authState message:', { 
+        signedIn: msg.signedIn, 
+        user: msg.user ? msg.user.email : 'null' 
+      });
+      applyAuthState(msg.signedIn, msg.user); 
+      return;
     }
-  });
-
-  window.addEventListener('message', event => {
-    const msg = event.data;
-
-    if (msg.type === 'authState') { applyAuthState(msg.signedIn, msg.user); }
     if (msg.type === 'userMessage') add('You', msg.message, 'user');
     if (msg.type === 'assistantMessage') add('AI', msg.message, 'assistant');
     if (msg.type === 'linkCheckpoint') {
-      // Link the most recent user message to a checkpoint so its restore button works
       const userMsgs = chat.querySelectorAll('.msg.user');
       const last = userMsgs[userMsgs.length - 1];
       if (last) {
@@ -2849,24 +3013,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (msg.type === 'loading') {
       loading = msg.isLoading;
-      send.disabled = loading;
-      input.disabled = loading;
-      loadingBar.className = msg.isLoading ? 'loading-bar active' : 'loading-bar';
-      typingIndicator.className = msg.isLoading ? 'typing active' : 'typing';
+      if (send) send.disabled = loading;
+      if (input) input.disabled = loading;
+      if (loadingBar) loadingBar.className = msg.isLoading ? 'loading-bar active' : 'loading-bar';
+      if (typingIndicator) typingIndicator.className = msg.isLoading ? 'typing active' : 'typing';
     }
-    if (msg.type === 'clearMessages') chat.innerHTML = '';
+    if (msg.type === 'clearMessages' && chat) chat.innerHTML = '';
     if (msg.type === 'error') add('Error', msg.message, 'assistant');
     if (msg.type === 'modeChanged') {
       currentMode = msg.mode;
-      modeSelect.value = msg.mode;
+      if (modeSelect) modeSelect.value = msg.mode;
     }
     if (msg.type === 'planMessage') {
-      // Show plan with execute button
       addPlan(msg.message, msg.originalRequest);
     }
     if (msg.type === 'checkpoint') addCheckpointBanner(msg.id);
     if (msg.type === 'insertFileRef') {
-      // From the 📎 file picker — add as a manual chip
       const refs = msg.ref.split(/\\s+/).filter(Boolean);
       for (const r of refs) {
         const cleaned = r.replace(/^@file\\s*/i, '');
@@ -2876,10 +3038,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
       renderChips();
-      input.focus();
+      if (input) input.focus();
     }
     if (msg.type === 'activeFile') {
-      // Update the auto-tracked active file chip
       trackedFiles = trackedFiles.filter(t => t.source !== 'active');
       if (msg.fileName && msg.relPath) {
         trackedFiles.unshift({
@@ -2893,28 +3054,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (msg.type === 'modelList') {
       availableModels = msg.models || [];
-      modelSelect.innerHTML = '';
-      for (const m of availableModels) {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.label + ' (' + m.ctx + ')';
-        if (m.id === msg.activeModel) { opt.selected = true; }
-        modelSelect.appendChild(opt);
+      if (modelSelect) {
+        modelSelect.innerHTML = '';
+        for (const m of availableModels) {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = m.label + ' (' + m.ctx + ')';
+          if (m.id === msg.activeModel) { opt.selected = true; }
+          modelSelect.appendChild(opt);
+        }
       }
     }
     if (msg.type === 'modelChangeResult') {
       if (msg.success) {
-        modelSelect.value = msg.activeModel;
+        if (modelSelect) modelSelect.value = msg.activeModel;
       } else {
-        // Revert the dropdown to the active model
         const cur = availableModels.find(m => m.id === msg.activeModel);
-        if (cur) { modelSelect.value = cur.id; }
+        if (cur && modelSelect) { modelSelect.value = cur.id; }
         if (msg.error) {
           add('Error', msg.error, 'assistant');
         }
       }
     }
-  });
+  }
+
+  // Process any messages that arrived before this point
+  console.log('📬 Processing', _pendingMessages.length, 'queued messages');
+  for (const msg of _pendingMessages) {
+    _handleMessage(msg);
+  }
+  _pendingMessages.length = 0;
+
+  // Tell the extension we're ready to receive messages
+  console.log('✅ Webview ready, notifying extension');
+  vscode.postMessage({ type: 'webviewReady' });
 
   function add(title, text, cls) {
     const div = document.createElement('div');
