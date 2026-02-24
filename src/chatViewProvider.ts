@@ -1980,12 +1980,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtml(webview: vscode.Webview): string {
     const nonce = this.getNonce();
+    const paperclipUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'paperclip.png'));
     return `<!DOCTYPE html>
 <html lang="en" style="height:100%;">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: https://*.googleusercontent.com;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: https://*.googleusercontent.com ${webview.cspSource};">
 <style>
   * { box-sizing: border-box; }
   body {
@@ -2646,7 +2647,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <div class="toolbar-left">
           
           <button class="toolbar-btn" id="addImage" title="Upload UI screenshot">
-            <span class="icon">🖼</span>
+            <img src="${paperclipUri}" alt="Attach" style="width:18px;height:18px;opacity:0.85;" />
           </button>
           <select class="toolbar-select" id="modeSelect">
             <option value="ask">Ask</option>
