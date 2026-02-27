@@ -222,6 +222,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         case 'googleSignIn': {
           console.log('🔐 Extension received googleSignIn request');
+          vscode.window.showInformationMessage('🔐 Starting Google Sign-In...');
           if (this.authProvider) {
             try {
               const user = await this.authProvider.signIn();
