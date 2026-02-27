@@ -7,8 +7,13 @@ import {
   createWorkspaceFile,
   createWorkspaceFileQuiet,
   parseMultiFileResponse,
+  parseIntegrationResponse,
+  modifyWorkspaceFile,
+  workspaceFileExists,
+  readMultipleFiles,
   buildProjectTree,
   readFilesAsContext,
+  readWorkspaceFile,
   extractFileReferences,
   stripFileReferences,
   gatherProjectContext,
@@ -373,9 +378,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!this._view) { return; }
     const models = GroqClient.AVAILABLE_MODELS;
     const activeModel = this.groqClient.getActiveModel();
+    // Attach hasKey flag so webview can group them
+    const modelsWithKeyStatus = models.map(m => ({
+      ...m,
+      hasKey: !!(this.groqClient.getApiKeyForModel(m.id)?.trim()),
+    }));
     this._view.webview.postMessage({
       type: 'modelList',
-      models,
+      models: modelsWithKeyStatus,
       activeModel,
     });
   }
@@ -828,6 +838,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       if (createFileMatch) {
         await this.handleCreateFile(cleanMessage, createFileMatch, referencedFilesContext);
+        return;
+      }
+
+      // ── Detect create-and-integrate intent (new component + modify existing files) ──
+      if (this.isCreateAndIntegrateIntent(cleanMessage)) {
+        await this.handleCreateAndIntegrate(cleanMessage, allFileRefs, referencedFilesContext);
         return;
       }
 
@@ -1287,6 +1303,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       'CRITICAL RULES (FOLLOW EXACTLY):',
       '- Output each file using this EXACT format:',
       '',
+      'For NEW files:',
+      '===NEW_FILE: path/to/file.ext===',
+      '...complete file content...',
+      '===END_FILE===',
+      '',
+      'For MODIFYING existing files (use targeted search/replace):',
+      '===MODIFY_FILE: path/to/existing.ext===',
+      '<<<SEARCH>>>',
+      '...exact lines to find in the existing file...',
+      '<<<REPLACE>>>',
+      '...replacement lines...',
+      '<<<END>>>',
+      '===END_FILE===',
+      '',
+      'If you prefer to output the FULL updated file instead of search/replace, use:',
       '===FILE: path/to/file.ext===',
       '...complete file content...',
       '===END_FILE===',
@@ -1297,8 +1328,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       '- Create complete, production-ready file contents — not stubs or placeholders.',
       '- Include proper imports, exports, and type annotations.',
       '- Do NOT add markdown, explanations, or commentary outside of file blocks.',
-      '- Do NOT wrap the ===FILE=== blocks inside code fences.',
-      '- If modifying an existing file, output the COMPLETE updated file content.',
+      '- Do NOT wrap the file blocks inside code fences.',
+      '- IMPORTANT: If you are adding new components, also MODIFY existing files to import and use them.',
       '- Order files so dependencies come before dependents.',
       '- For web apps, include HTML, CSS, and JS/TS files as needed.',
       '- For Node.js projects, include package.json with dependencies.',
@@ -1312,7 +1343,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const budget = Math.floor(charBudget * 0.6);
       userPrompt += `Project context:\n${ctx.length > budget ? ctx.slice(0, budget) + '\n/* ...trimmed... */' : ctx}\n\n`;
     }
-    userPrompt += 'Generate the files now. Start with ===FILE: path=== immediately.';
+    userPrompt += 'Generate the files now. Start with ===NEW_FILE: path=== or ===FILE: path=== immediately.';
 
     const messages: GroqMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -1322,10 +1353,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     console.log('🚀 Calling Groq API (multi-file generation with continuation)...');
     const rawResponse = await this.groqClient.completeWithContinuation(messages, { maxContinuations: 5 });
 
-    // Parse structured file blocks from the response
-    const fileBlocks = parseMultiFileResponse(rawResponse);
+    // Parse using the enhanced integration parser (handles NEW_FILE, MODIFY_FILE, and FILE blocks)
+    const integration = parseIntegrationResponse(rawResponse);
 
-    if (fileBlocks.length === 0) {
+    if (integration.newFiles.length === 0 && integration.modifications.length === 0) {
       // AI didn't use the structured format — fall back to showing the response as chat
       this._view?.webview.postMessage({
         type: 'assistantMessage',
@@ -1334,12 +1365,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // Create all files
+    // Create all new files
     const created: string[] = [];
     const failed: string[] = [];
     let firstUri: vscode.Uri | undefined;
 
-    for (const block of fileBlocks) {
+    for (const block of integration.newFiles) {
       try {
         const uri = await createWorkspaceFileQuiet(block.path, block.content);
         if (uri) {
@@ -1362,16 +1393,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } catch { /* non-fatal */ }
     }
 
+    // Apply modifications to existing files (if any)
+    const modified: string[] = [];
+    const failedMods: string[] = [];
+    for (const mod of integration.modifications) {
+      const exists = await workspaceFileExists(mod.path);
+      if (!exists) {
+        failedMods.push(`${mod.path} (not found)`);
+        continue;
+      }
+      const result = await modifyWorkspaceFile(mod.path, mod.operations);
+      if (result.success) {
+        modified.push(mod.path);
+      } else {
+        failedMods.push(`${mod.path} (${result.error})`);
+      }
+    }
+
     // Build summary message
-    let summary = `✅ Created ${created.length} file${created.length !== 1 ? 's' : ''}:\n\n`;
-    for (const f of created) {
-      summary += `  📄 ${f}\n`;
+    let summary = '';
+    if (created.length > 0) {
+      summary += `✅ Created ${created.length} file${created.length !== 1 ? 's' : ''}:\n\n`;
+      for (const f of created) {
+        summary += `  📄 ${f}\n`;
+      }
+    }
+    if (modified.length > 0) {
+      summary += `\n🔧 Modified ${modified.length} existing file${modified.length !== 1 ? 's' : ''}:\n`;
+      for (const f of modified) {
+        summary += `  ✏️ ${f}\n`;
+      }
     }
     if (failed.length > 0) {
       summary += `\n⚠️ Failed to create ${failed.length} file${failed.length !== 1 ? 's' : ''}:\n`;
       for (const f of failed) {
         summary += `  ❌ ${f}\n`;
       }
+    }
+    if (failedMods.length > 0) {
+      summary += `\n⚠️ Failed to modify: ${failedMods.join(', ')}\n`;
     }
 
     this._view?.webview.postMessage({
@@ -1380,7 +1440,292 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
 
     this.conversationHistory.push({ role: 'assistant', content: summary });
-    vscode.window.showInformationMessage(`Prompt2Code: Created ${created.length} files`);
+    vscode.window.showInformationMessage(`Prompt2Code: Created ${created.length} files, modified ${modified.length} files`);
+  }
+
+  // ===========================
+  // CREATE & INTEGRATE — Create new files + modify existing files
+  // ===========================
+
+  /**
+   * Detect if the user wants to create/add a new component AND have it
+   * integrated into existing files (e.g. "add a sidebar component and
+   * integrate it into App.tsx").
+   *
+   * This also catches implicit integration intent like:
+   * - "create a navbar component" (in a React project, needs import in App)
+   * - "add authentication to the app" (needs new files + wiring)
+   * - "add a contact page and link it in the router"
+   */
+  private isCreateAndIntegrateIntent(msg: string): boolean {
+    const lower = msg.toLowerCase();
+
+    // Explicit integration keywords
+    if (/\b(integrate|wire|connect|hook\s*up|plug\s*in|link|register|add\s*to\s*router|add\s*to\s*app|add\s*to\s*layout|include\s*in)\b/i.test(lower)) {
+      return true;
+    }
+
+    // "add/create X component/page/module" without specifying an exact filename
+    // In a project with existing structure, this implies integration
+    if (/\b(add|create|build|implement|make)\s+(a\s+|the\s+|new\s+)*([\w-]+\s+)?(component|page|route|module|feature|section|service|hook|provider|context|middleware|util|helper|guard|interceptor|pipe|directive|store|slice|reducer|action)/i.test(lower)) {
+      // Only trigger if it's NOT a bare "create file X.ext" (that's handled elsewhere)
+      if (!this.detectCreateFileIntent(msg)) {
+        return true;
+      }
+    }
+
+    // "add X to Y" pattern (e.g., "add dark mode to the app", "add search to the header")
+    if (/\b(add|implement|include|put|place)\b.{1,40}\b(to|into|in|inside|within)\s+(the\s+)?(app|layout|page|router|navigation|menu|sidebar|header|footer|main|index|home|dashboard)/i.test(lower)) {
+      return true;
+    }
+
+    // Feature-level requests that need multiple file touches
+    if (/\b(add|implement|create|build|set\s*up)\s+(a\s+|the\s+)?(authentication|auth|login\s*system|user\s*management|dark\s*mode|theme\s*switch|search\s*feature|notification|toast\s*system|modal\s*system|routing|state\s*management|api\s*layer|error\s*handling|loading\s*state|pagination|infinite\s*scroll|form\s*validation|file\s*upload|drag\s*and\s*drop|websocket|real[\s-]*time|caching|i18n|internationalization|localization|analytics|logging|testing\s*setup)/i.test(lower)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Main handler: analyze the codebase, generate new files, and modify
+   * existing files to integrate the new code.
+   */
+  private async handleCreateAndIntegrate(
+    instruction: string,
+    attachedFileRefs: string[],
+    referencedFilesContext: string
+  ): Promise<void> {
+    this._view?.webview.postMessage({
+      type: 'assistantMessage',
+      message: '🔍 Analyzing your codebase to plan the integration…'
+    });
+
+    try {
+      // ── 1. Deep codebase analysis ──
+      const tree = await buildProjectTree();
+      const allFiles = await listWorkspaceFiles(300);
+
+      // Identify key structural files (entry points, routers, layouts, configs)
+      const structuralPatterns = [
+        /\b(app|main|index|layout|root)\.(tsx?|jsx?|vue|svelte)$/i,
+        /\brouter\b.*\.(tsx?|jsx?)$/i,
+        /\broutes?\b.*\.(tsx?|jsx?)$/i,
+        /\bnavigation\b.*\.(tsx?|jsx?)$/i,
+        /\bstore\b.*\.(tsx?|jsx?)$/i,
+        /\bprovider\b.*\.(tsx?|jsx?)$/i,
+        /\b_app\b.*\.(tsx?|jsx?)$/i,       // Next.js
+        /\b_layout\b.*\.(tsx?|jsx?)$/i,     // Next.js app router
+        /\bpage\b.*\.(tsx?|jsx?)$/i,        // Next.js pages
+      ];
+
+      const structuralFiles = allFiles.filter(f =>
+        structuralPatterns.some(p => p.test(f))
+      ).slice(0, 10);
+
+      // Read structural files so the AI knows what to modify
+      const structuralContents = await readMultipleFiles(structuralFiles, 12_000);
+
+      // Also read referenced files
+      const contextParts: string[] = [];
+      if (referencedFilesContext) { contextParts.push(referencedFilesContext); }
+
+      // Build structural files context
+      let structuralContext = '';
+      for (const [filePath, content] of structuralContents) {
+        structuralContext += `\n--- EXISTING FILE: ${filePath} ---\n${content}\n`;
+      }
+
+      // Auto-scan project context
+      const charBudget = this.groqClient.getContextCharBudget();
+      const projCtx = await gatherProjectContext({
+        maxChars: Math.min(charBudget, 25_000),
+        maxFiles: 10,
+      });
+      if (projCtx.text) { contextParts.push(projCtx.text); }
+
+      // ── 2. Build the integration prompt ──
+      const systemPrompt = [
+        'You are an expert developer. Your job is to CREATE new files AND MODIFY existing files to fully integrate new functionality into the codebase.',
+        '',
+        'You have two types of output blocks:',
+        '',
+        '1. NEW FILES — creates a brand new file:',
+        '===NEW_FILE: path/to/new/file.tsx===',
+        '...complete file content...',
+        '===END_FILE===',
+        '',
+        '2. MODIFY FILES — applies targeted edits to an existing file:',
+        '===MODIFY_FILE: path/to/existing/file.tsx===',
+        '<<<SEARCH>>>',
+        '...exact lines to find in the existing file...',
+        '<<<REPLACE>>>',
+        '...replacement lines...',
+        '<<<END>>>',
+        '===END_FILE===',
+        '',
+        'CRITICAL RULES:',
+        '- Analyze the EXISTING codebase structure, imports, patterns, and conventions FIRST.',
+        '- Create new files in the correct directory following the project\'s file organization.',
+        '- ALWAYS modify existing files to import and use the new components/modules.',
+        '- In MODIFY_FILE blocks, the SEARCH section must contain EXACT lines from the existing file (copy them precisely!).',
+        '- You can have MULTIPLE <<<SEARCH>>>...<<<REPLACE>>>...<<<END>>> blocks in one MODIFY_FILE.',
+        '- Order: output new files first, then modifications to existing files.',
+        '- Match the project\'s code style, naming, and framework patterns exactly.',
+        '- Use the same libraries/frameworks already in the project — don\'t introduce new ones unless asked.',
+        '- Generate COMPLETE, production-ready code — no stubs or TODOs.',
+        '- Include proper imports, types, and exports.',
+        '- Do NOT add markdown or explanations outside of file blocks.',
+        '- Start output IMMEDIATELY with ===NEW_FILE=== or ===MODIFY_FILE===.',
+        '',
+        'COMMON INTEGRATION PATTERNS:',
+        '- React: Create component → import in parent → render in JSX → add route if needed',
+        '- Vue: Create .vue file → import in parent → register component → add route if needed',
+        '- Angular: Create component → add to module declarations → add route → update template',
+        '- HTML: Create file → add link/script in main HTML → update navigation links',
+        '- Next.js: Create page/component → import where needed → update layout/navigation',
+        '- Express: Create route/controller → import in app/server → register middleware/route',
+      ].join('\n');
+
+      let userPrompt = `Instruction: ${instruction}\n\n`;
+      userPrompt += `Project structure:\n${tree}\n\n`;
+
+      if (structuralContext) {
+        userPrompt += `KEY EXISTING FILES (study these carefully — you must match their patterns):\n${structuralContext}\n\n`;
+      }
+
+      if (contextParts.length > 0) {
+        const ctx = contextParts.join('\n\n');
+        const budget = Math.floor(charBudget * 0.4);
+        userPrompt += `Additional project context:\n${ctx.length > budget ? ctx.slice(0, budget) + '\n/* ...trimmed... */' : ctx}\n\n`;
+      }
+
+      userPrompt += 'Now create the new files AND modify existing files to integrate everything. Start immediately with ===NEW_FILE=== or ===MODIFY_FILE===.';
+
+      const messages: GroqMessage[] = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ];
+
+      this._view?.webview.postMessage({
+        type: 'assistantMessage',
+        message: '⏳ Generating new files and integration changes…'
+      });
+
+      // ── 3. Call AI with continuation support ──
+      console.log('🚀 Calling Groq API (create-and-integrate mode)...');
+      const rawResponse = await this.groqClient.completeWithContinuation(messages, { maxContinuations: 5 });
+
+      // ── 4. Parse the response ──
+      const integration = parseIntegrationResponse(rawResponse);
+
+      if (integration.newFiles.length === 0 && integration.modifications.length === 0) {
+        // AI didn't use the structured format — show as chat
+        this._view?.webview.postMessage({
+          type: 'assistantMessage',
+          message: rawResponse,
+        });
+        return;
+      }
+
+      // ── 5. Create new files ──
+      const createdFiles: string[] = [];
+      const failedFiles: string[] = [];
+      let firstUri: vscode.Uri | undefined;
+
+      for (const file of integration.newFiles) {
+        try {
+          const uri = await createWorkspaceFileQuiet(file.path, file.content);
+          if (uri) {
+            createdFiles.push(file.path);
+            if (!firstUri) { firstUri = uri; }
+          } else {
+            failedFiles.push(file.path);
+          }
+        } catch (err: any) {
+          console.error(`Failed to create ${file.path}:`, err);
+          failedFiles.push(file.path);
+        }
+      }
+
+      // ── 6. Apply modifications to existing files ──
+      const modifiedFiles: string[] = [];
+      const failedMods: string[] = [];
+
+      for (const mod of integration.modifications) {
+        // Check if file exists before modifying
+        const exists = await workspaceFileExists(mod.path);
+        if (!exists) {
+          console.warn(`Cannot modify ${mod.path}: file does not exist`);
+          failedMods.push(`${mod.path} (not found)`);
+          continue;
+        }
+
+        const result = await modifyWorkspaceFile(mod.path, mod.operations);
+        if (result.success) {
+          modifiedFiles.push(mod.path);
+        } else {
+          console.warn(`Failed to modify ${mod.path}: ${result.error}`);
+          failedMods.push(`${mod.path} (${result.error})`);
+        }
+      }
+
+      // ── 7. Open the first created file in the editor ──
+      if (firstUri) {
+        try {
+          const doc = await vscode.workspace.openTextDocument(firstUri);
+          await vscode.window.showTextDocument(doc, { preview: false });
+        } catch { /* non-fatal */ }
+      }
+
+      // ── 8. Build summary ──
+      let summary = '';
+
+      if (createdFiles.length > 0) {
+        summary += `✅ Created ${createdFiles.length} new file${createdFiles.length !== 1 ? 's' : ''}:\n`;
+        for (const f of createdFiles) {
+          summary += `  📄 ${f}\n`;
+        }
+      }
+
+      if (modifiedFiles.length > 0) {
+        summary += `\n🔧 Modified ${modifiedFiles.length} existing file${modifiedFiles.length !== 1 ? 's' : ''} for integration:\n`;
+        for (const f of modifiedFiles) {
+          summary += `  ✏️ ${f}\n`;
+        }
+      }
+
+      if (failedFiles.length > 0) {
+        summary += `\n⚠️ Failed to create: ${failedFiles.join(', ')}\n`;
+      }
+      if (failedMods.length > 0) {
+        summary += `\n⚠️ Failed to modify: ${failedMods.join(', ')}\n`;
+      }
+
+      if (!summary) {
+        summary = '⚠️ No files were created or modified. The AI response did not contain valid file blocks.';
+      }
+
+      this._view?.webview.postMessage({
+        type: 'assistantMessage',
+        message: summary,
+      });
+
+      this.conversationHistory.push({ role: 'assistant', content: summary });
+
+      vscode.window.showInformationMessage(
+        `Prompt2Code: Created ${createdFiles.length} file${createdFiles.length !== 1 ? 's' : ''}, modified ${modifiedFiles.length} file${modifiedFiles.length !== 1 ? 's' : ''}`
+      );
+
+    } catch (err: any) {
+      console.error('❌ Create-and-integrate error:', err);
+      this._view?.webview.postMessage({
+        type: 'error',
+        message: err.message || 'Failed to create and integrate files.'
+      });
+    } finally {
+      this._view?.webview.postMessage({ type: 'loading', isLoading: false });
+    }
   }
 
   // ===========================
@@ -2338,6 +2683,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     display: inline-block; width: 14px; margin-right: 4px;
     font-size: 11px; opacity: 0.8;
   }
+  .picker-group-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 14px 4px; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.7px; text-transform: uppercase;
+    color: var(--vscode-foreground); opacity: 0.45;
+    pointer-events: none; user-select: none;
+  }
+  .picker-group-header:first-child { margin-top: 0; }
+  .picker-divider {
+    height: 1px; margin: 4px 10px;
+    background: var(--vscode-panel-border, rgba(255,255,255,0.12));
+    opacity: 0.7; pointer-events: none;
+  }
+  .picker-group-header .key-dot {
+    width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  }
+  .picker-group-header .key-dot.green { background: #4ec94e; }
+  .picker-group-header .key-dot.gray { background: #888; }
+  .picker-item.no-key { opacity: 0.55; }
+  .picker-item.no-key:hover { opacity: 0.8; }
+  .picker-item .key-badge {
+    display: inline-block; font-size: 9px; padding: 1px 5px;
+    border-radius: 3px; margin-left: 6px; vertical-align: middle;
+    background: rgba(78,201,78,0.15); color: #4ec94e; font-weight: 600;
+  }
+  .picker-item.no-key .key-badge {
+    background: rgba(136,136,136,0.15); color: #999;
+  }
 
   /* Plan actions */
   .plan-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
@@ -2537,24 +2910,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             <path d="M13.23 1h-1.46L3.52 9.25l-.16.22L1 13.59 2.41 15l4.12-2.36.22-.16L15 4.23V2.77L13.23 1zM2.41 13.59l1.51-3 1.45 1.45-2.96 1.55zm3.83-2.06L4.47 9.76l8-8 1.77 1.77-8 8z"/>
           </svg>
         </button>
-        <!-- Search: magnifying glass -->
-        <button class="session-icon-btn" title="Search sessions">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0zm-.82 4.74a5.5 5.5 0 1 1 .71-.71l3.33 3.32-.7.71-3.34-3.32z"/>
-          </svg>
-        </button>
-        <!-- Filter: funnel -->
-        <button class="session-icon-btn" title="Filter sessions">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M1 2h14l-5.2 6.24V14l-3.6-1.8V8.24L1 2zm1.4 1L7.2 8.76V11.8l1.6.8V8.76L13.6 3H2.4z"/>
-          </svg>
-        </button>
-        <!-- Layout toggle: split-panel / sidebar -->
-        <button class="session-icon-btn" title="Toggle layout">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M2 2h12a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm0 1v10h5V3H2zm6 0v10h6V3H8z"/>
-          </svg>
-        </button>
+      
       </div>
     </div>
     <div class="sessions-list" id="sessionsList"></div>
@@ -3247,12 +3603,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       availableModels = msg.models || [];
       if (modelSelect) {
         modelSelect.innerHTML = '';
-        for (const m of availableModels) {
-          const opt = document.createElement('option');
-          opt.value = m.id;
-          opt.textContent = m.label + ' (' + m.ctx + ')';
-          if (m.id === msg.activeModel) { opt.selected = true; }
-          modelSelect.appendChild(opt);
+        // Group by key status in <optgroup>
+        const withKey = availableModels.filter(m => m.hasKey);
+        const noKey = availableModels.filter(m => !m.hasKey);
+        if (withKey.length > 0) {
+          const grp = document.createElement('optgroup');
+          grp.label = '\u2705 API Key Set';
+          for (const m of withKey) {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.label + ' (' + m.ctx + ')';
+            if (m.id === msg.activeModel) { opt.selected = true; }
+            grp.appendChild(opt);
+          }
+          modelSelect.appendChild(grp);
+        }
+        if (noKey.length > 0) {
+          const grp = document.createElement('optgroup');
+          grp.label = '\uD83D\uDD12 No API Key';
+          for (const m of noKey) {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.label + ' (' + m.ctx + ')';
+            if (m.id === msg.activeModel) { opt.selected = true; }
+            grp.appendChild(opt);
+          }
+          modelSelect.appendChild(grp);
         }
       }
       // Update model label button
@@ -3261,20 +3637,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const active = availableModels.find(m => m.id === msg.activeModel);
         if (active) modelLabelEl.textContent = active.label;
       }
-      // Populate model picker
+      // Populate model picker — grouped by API key status
       if (modelPicker) {
         modelPicker.innerHTML = '';
-        for (const m of availableModels) {
-          const btn = document.createElement('button');
-          btn.className = 'picker-item' + (m.id === msg.activeModel ? ' selected' : '');
-          btn.innerHTML =
-            '<span class="picker-check">' + (m.id === msg.activeModel ? '\u2713' : '') + '</span>' +
-            m.label;
-          btn.onclick = () => {
-            modelPicker.classList.remove('open');
-            vscode.postMessage({ type: 'selectModel', modelId: m.id });
-          };
-          modelPicker.appendChild(btn);
+        const withKey = availableModels.filter(m => m.hasKey);
+        const noKey = availableModels.filter(m => !m.hasKey);
+        if (withKey.length > 0) {
+          const hdr = document.createElement('div');
+          hdr.className = 'picker-group-header';
+          hdr.innerHTML = '<span class="key-dot green"></span> API Key Set';
+          modelPicker.appendChild(hdr);
+          for (const m of withKey) {
+            const btn = document.createElement('button');
+            btn.className = 'picker-item' + (m.id === msg.activeModel ? ' selected' : '');
+            btn.setAttribute('data-model-id', m.id);
+            btn.innerHTML =
+              '<span class="picker-check">' + (m.id === msg.activeModel ? '\u2713' : '') + '</span>' +
+              m.label + ' <span style="opacity:0.45;font-size:10px">(' + m.ctx + ')</span>';
+            btn.onclick = () => {
+              modelPicker.classList.remove('open');
+              vscode.postMessage({ type: 'selectModel', modelId: m.id });
+            };
+            modelPicker.appendChild(btn);
+          }
+        }
+        if (noKey.length > 0) {
+          if (withKey.length > 0) {
+            const divider = document.createElement('div');
+            divider.className = 'picker-divider';
+            modelPicker.appendChild(divider);
+          }
+          const hdr = document.createElement('div');
+          hdr.className = 'picker-group-header';
+          hdr.innerHTML = '<span class="key-dot gray"></span> No API Key';
+          modelPicker.appendChild(hdr);
+          for (const m of noKey) {
+            const btn = document.createElement('button');
+            btn.className = 'picker-item no-key' + (m.id === msg.activeModel ? ' selected' : '');
+            btn.setAttribute('data-model-id', m.id);
+            btn.innerHTML =
+              '<span class="picker-check">' + (m.id === msg.activeModel ? '\u2713' : '') + '</span>' +
+              m.label + ' <span style="opacity:0.45;font-size:10px">(' + m.ctx + ')</span>';
+            btn.onclick = () => {
+              modelPicker.classList.remove('open');
+              vscode.postMessage({ type: 'selectModel', modelId: m.id });
+            };
+            modelPicker.appendChild(btn);
+          }
         }
       }
     }
@@ -3284,16 +3693,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const modelLabelEl = document.getElementById('modelLabel');
         if (modelLabelEl) {
           const active = availableModels.find(m => m.id === msg.activeModel);
-          if (active) modelLabelEl.textContent = active.label;
+          if (active) {
+            modelLabelEl.textContent = active.label;
+            // When a key is now set for this model, update hasKey flag
+            active.hasKey = true;
+          }
         }
-        // Update picker checkmarks
+        // Update picker checkmarks using data-model-id attribute
         if (modelPicker) {
-          modelPicker.querySelectorAll('.picker-item').forEach((btn, i) => {
-            const m = availableModels[i];
-            if (m) {
-              btn.classList.toggle('selected', m.id === msg.activeModel);
-              btn.querySelector('.picker-check').textContent = m.id === msg.activeModel ? '\u2713' : '';
-            }
+          modelPicker.querySelectorAll('.picker-item').forEach(btn => {
+            const id = btn.getAttribute('data-model-id');
+            const isActive = id === msg.activeModel;
+            btn.classList.toggle('selected', isActive);
+            const check = btn.querySelector('.picker-check');
+            if (check) check.textContent = isActive ? '\u2713' : '';
           });
         }
       } else {

@@ -420,6 +420,220 @@ export async function gatherProjectContext(opts: GatherOptions = {}): Promise<Pr
   };
 }
 
+// ────────────────────────────────────────────────────
+// MODIFY EXISTING WORKSPACE FILES (search/replace)
+// ────────────────────────────────────────────────────
+
+export interface SearchReplaceOp {
+  search: string;
+  replace: string;
+}
+
+export interface FileModification {
+  path: string;
+  operations: SearchReplaceOp[];
+}
+
+export interface IntegrationResult {
+  /** Brand-new files to create. */
+  newFiles: { path: string; content: string }[];
+  /** Existing files to modify with search/replace operations. */
+  modifications: FileModification[];
+}
+
+/**
+ * Apply a series of search/replace edits to an existing workspace file.
+ * Returns { success, error? }. Does NOT open the file in the editor.
+ */
+export async function modifyWorkspaceFile(
+  relPath: string,
+  operations: SearchReplaceOp[]
+): Promise<{ success: boolean; error?: string }> {
+  const root = getWorkspaceRoot();
+  if (!root) { return { success: false, error: 'No workspace folder open.' }; }
+
+  const abs = path.resolve(root, relPath);
+  if (!abs.startsWith(root)) { return { success: false, error: 'Invalid path.' }; }
+
+  // Read the current file
+  let content: string;
+  try {
+    const uri = vscode.Uri.file(abs);
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    content = new TextDecoder('utf-8').decode(bytes);
+  } catch {
+    return { success: false, error: `File not found: ${relPath}` };
+  }
+
+  // Apply each search/replace operation sequentially
+  for (const op of operations) {
+    const searchNorm = op.search.replace(/\r\n/g, '\n').trim();
+    const contentNorm = content.replace(/\r\n/g, '\n');
+
+    // Exact match first
+    if (contentNorm.includes(searchNorm)) {
+      content = contentNorm.replace(searchNorm, op.replace.replace(/\r\n/g, '\n'));
+      continue;
+    }
+
+    // Fuzzy match: ignore leading/trailing whitespace per line
+    const searchLines = searchNorm.split('\n').map(l => l.trim());
+    const contentLines = contentNorm.split('\n');
+    let matchStart = -1;
+
+    for (let i = 0; i <= contentLines.length - searchLines.length; i++) {
+      let matched = true;
+      for (let j = 0; j < searchLines.length; j++) {
+        if (contentLines[i + j].trim() !== searchLines[j]) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) {
+        matchStart = i;
+        break;
+      }
+    }
+
+    if (matchStart >= 0) {
+      const before = contentLines.slice(0, matchStart);
+      const after = contentLines.slice(matchStart + searchLines.length);
+      const replacement = op.replace.replace(/\r\n/g, '\n');
+      content = [...before, replacement, ...after].join('\n');
+    } else {
+      // If search block not found, try as a simple substring anywhere
+      // (handles cases where AI simplified whitespace)
+      const compactSearch = searchNorm.replace(/\s+/g, ' ');
+      const compactContent = contentNorm.replace(/\s+/g, ' ');
+      if (!compactContent.includes(compactSearch)) {
+        console.warn(`modifyWorkspaceFile: could not find search block in ${relPath}:\n${op.search.substring(0, 200)}`);
+        // Don't fail — skip this op but continue with others
+      }
+    }
+  }
+
+  // Write back
+  try {
+    const uri = vscode.Uri.file(abs);
+    const encoded = new TextEncoder().encode(content);
+    await vscode.workspace.fs.writeFile(uri, encoded);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Parse an AI response that contains both new files and modifications.
+ *
+ * Expected format:
+ *
+ * ===NEW_FILE: path/to/file.tsx===
+ * ...full file content...
+ * ===END_FILE===
+ *
+ * ===MODIFY_FILE: path/to/existing.tsx===
+ * <<<SEARCH>>>
+ * import { Header } from './Header';
+ * <<<REPLACE>>>
+ * import { Header } from './Header';
+ * import { Sidebar } from './Sidebar';
+ * <<<END>>>
+ * ===END_FILE===
+ *
+ * Falls back to the regular parseMultiFileResponse if no markers found.
+ */
+export function parseIntegrationResponse(response: string): IntegrationResult {
+  const result: IntegrationResult = { newFiles: [], modifications: [] };
+  const seenNew = new Set<string>();
+  const seenMod = new Set<string>();
+
+  // ── Parse ===NEW_FILE: path=== blocks ──
+  const newFilePattern = /===\s*NEW_FILE:\s*(.+?)\s*===\s*\n([\s\S]*?)===\s*END_FILE\s*===/g;
+  let match: RegExpExecArray | null;
+  while ((match = newFilePattern.exec(response))) {
+    const filePath = cleanFilePathIntegration(match[1]);
+    const content = match[2].trimEnd();
+    if (filePath && content && !seenNew.has(filePath)) {
+      seenNew.add(filePath);
+      result.newFiles.push({ path: filePath, content });
+    }
+  }
+
+  // ── Parse ===MODIFY_FILE: path=== blocks ──
+  const modFilePattern = /===\s*MODIFY_FILE:\s*(.+?)\s*===\s*\n([\s\S]*?)===\s*END_FILE\s*===/g;
+  while ((match = modFilePattern.exec(response))) {
+    const filePath = cleanFilePathIntegration(match[1]);
+    const body = match[2];
+    if (!filePath || seenMod.has(filePath)) { continue; }
+    seenMod.add(filePath);
+
+    // Parse <<<SEARCH>>>...<<<REPLACE>>>...<<<END>>> blocks within the body
+    const ops: SearchReplaceOp[] = [];
+    const srPattern = /<<<SEARCH>>>\s*\n([\s\S]*?)<<<REPLACE>>>\s*\n([\s\S]*?)<<<END>>>/g;
+    let srMatch: RegExpExecArray | null;
+    while ((srMatch = srPattern.exec(body))) {
+      ops.push({
+        search: srMatch[1].trimEnd(),
+        replace: srMatch[2].trimEnd(),
+      });
+    }
+
+    if (ops.length > 0) {
+      result.modifications.push({ path: filePath, operations: ops });
+    }
+  }
+
+  // ── Fallback: if no NEW_FILE/MODIFY_FILE markers, try regular ===FILE:=== format ──
+  if (result.newFiles.length === 0 && result.modifications.length === 0) {
+    const regularFiles = parseMultiFileResponse(response);
+    for (const f of regularFiles) {
+      result.newFiles.push(f);
+    }
+  }
+
+  return result;
+}
+
+/** Normalize a file path from the AI integration response. */
+function cleanFilePathIntegration(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^[`"']+|[`"']+$/g, '')
+    .replace(/^\.?\//, '')
+    .replace(/\\/g, '/');
+}
+
+/**
+ * Check if a file exists in the workspace.
+ */
+export async function workspaceFileExists(relPath: string): Promise<boolean> {
+  const root = getWorkspaceRoot();
+  if (!root) { return false; }
+  const abs = path.resolve(root, relPath);
+  return fs.existsSync(abs);
+}
+
+/**
+ * Read multiple workspace files and return them as a map.
+ * Useful for building context about specific files that need integration.
+ */
+export async function readMultipleFiles(
+  relPaths: string[],
+  maxCharsPerFile = 15_000
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  for (const rp of relPaths) {
+    const content = await readWorkspaceFile(rp);
+    if (content) {
+      map.set(rp, content.length > maxCharsPerFile
+        ? content.slice(0, maxCharsPerFile) + '\n/* ...truncated... */\n'
+        : content);
+    }
+  }
+  return map;
+}
+
 // ── internal ──
 
 function getWorkspaceRoot(): string | undefined {
