@@ -2480,27 +2480,93 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /* ── Chat area ── */
   .chat {
     flex: 1; overflow-y: auto; padding: 16px;
-    display: flex; flex-direction: column; gap: 20px;
+    display: flex; flex-direction: column; gap: 18px;
   }
   .msg { margin-bottom: 0; max-width: 100%; }
   .msg .msg-label {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.5px; margin-bottom: 6px; display: block;
+    letter-spacing: 0.6px; margin-bottom: 5px; display: flex;
+    align-items: center; gap: 5px;
     color: var(--vscode-foreground); opacity: 0.5;
   }
-  .msg.user .msg-label { color: var(--vscode-symbolIcon-methodForeground); opacity: 0.8; }
-  .msg.assistant .msg-label { color: var(--vscode-symbolIcon-keywordForeground); opacity: 0.8; }
+  .msg.user .msg-label { color: var(--vscode-symbolIcon-methodForeground); opacity: 0.85; font-weight: 800; }
+  .msg.assistant .msg-label { color: var(--vscode-symbolIcon-keywordForeground); opacity: 0.85; font-weight: 800; }
   .bubble {
-    color: var(--vscode-foreground); padding: 12px 16px;
-    border-radius: 12px; font-size: 13.5px; line-height: 1.6;
+    color: var(--vscode-foreground); padding: 10px 14px;
+    border-radius: 10px; font-size: 13px; line-height: 1.65;
     position: relative; word-wrap: break-word;
+    font-weight: 400;
   }
   .msg.user .bubble {
     background: var(--vscode-input-background);
     border: 1px solid var(--vscode-panel-border); border-top-right-radius: 2px;
+    font-weight: 450;
   }
   .msg.assistant .bubble { background: transparent; padding-left: 0; padding-right: 0; border-radius: 0; }
-  .msg-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+
+  /* ── Rich assistant message formatting ── */
+  .ai-section-header {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 12.5px; font-weight: 700; margin: 10px 0 6px;
+    color: var(--vscode-foreground);
+    letter-spacing: 0.2px;
+  }
+  .ai-section-header:first-child { margin-top: 0; }
+  .ai-section-header .section-icon { font-size: 14px; flex-shrink: 0; }
+  .ai-section-header .section-count {
+    font-size: 10px; font-weight: 600; padding: 1px 6px;
+    border-radius: 8px; margin-left: 2px;
+    background: var(--vscode-badge-background, rgba(255,255,255,0.1));
+    color: var(--vscode-badge-foreground, #ccc);
+  }
+  .ai-file-list {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .ai-file-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; border-radius: 6px; font-size: 12.5px;
+    font-family: var(--vscode-editor-font-family, 'Cascadia Code', 'Fira Code', 'Consolas', monospace);
+    font-weight: 500; letter-spacing: 0.1px;
+    color: var(--vscode-foreground); opacity: 0.92;
+    background: var(--vscode-editor-background, rgba(255,255,255,0.03));
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.06));
+    transition: background 0.15s;
+  }
+  .ai-file-item:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05)); }
+  .ai-file-item .file-icon { font-size: 13px; flex-shrink: 0; }
+  .ai-file-item .file-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-file-item.created .file-icon { color: #4ec94e; }
+  .ai-file-item.modified .file-icon { color: #ddb04b; }
+  .ai-file-item.failed .file-icon { color: #f48771; }
+  .ai-warning-list {
+    list-style: none; margin: 6px 0 0; padding: 0;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .ai-warning-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 10px; font-size: 12px; font-weight: 500;
+    color: #f48771; opacity: 0.85;
+  }
+  .ai-status-line {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 13px; font-weight: 500;
+    padding: 4px 0; color: var(--vscode-foreground);
+  }
+  .ai-status-line .status-icon { font-size: 15px; flex-shrink: 0; }
+  .ai-diff-summary {
+    margin: 8px 0 0; padding: 8px 12px;
+    background: var(--vscode-editor-background, rgba(0,0,0,0.15));
+    border-radius: 6px; border-left: 3px solid var(--vscode-symbolIcon-keywordForeground, #c586c0);
+    font-size: 12px; line-height: 1.7; font-weight: 400;
+    font-family: var(--vscode-editor-font-family, monospace);
+  }
+  .ai-diff-summary .diff-title { font-weight: 700; font-size: 12.5px; margin-bottom: 4px; display: block; }
+  .ai-diff-summary .diff-added { color: #4ec94e; font-weight: 600; }
+  .ai-diff-summary .diff-removed { color: #f48771; font-weight: 600; }
+  .ai-diff-summary .diff-size { opacity: 0.7; }
+  .ai-plain-text { white-space: pre-wrap; font-size: 13px; line-height: 1.65; font-weight: 400; }
+  .msg-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
   .msg-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.2s ease; }
   .msg:hover .msg-actions { opacity: 1; }
   .msg-actions button {
@@ -3942,12 +4008,151 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.textContent = text;
+
+    if (cls === 'assistant') {
+      bubble.innerHTML = formatAssistantMessage(text);
+    } else {
+      bubble.textContent = text;
+    }
 
     div.appendChild(header);
     div.appendChild(bubble);
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
+  }
+
+  /** Convert AI plain-text summary into rich HTML with proper styling */
+  function formatAssistantMessage(text) {
+    // Detect file-summary messages (created/modified/failed pattern)
+    const hasFileSummary = /(\u2705|✅)\\s*(Created|Generated)\\s+\\d+/i.test(text)
+      || /(\uD83D\uDD27|🔧)\\s*Modified\\s+\\d+/i.test(text)
+      || /(⚠️)\\s*Failed/i.test(text);
+    // Detect diff summary messages
+    const hasDiff = /📋 Changes made to/i.test(text);
+    // Detect loading/status messages
+    const isStatusMsg = /^(⏳|🔍|🖼️|⌛|🚀)/.test(text.trim());
+
+    if (!hasFileSummary && !hasDiff && !isStatusMsg) {
+      // Regular text message — preserve whitespace, escape HTML
+      return '<div class="ai-plain-text">' + escapeHtml(text) + '</div>';
+    }
+
+    if (isStatusMsg && !hasFileSummary && !hasDiff) {
+      return '<div class="ai-status-line"><span class="status-icon">' + text.trim().charAt(0) + text.trim().charAt(1) + '</span>' + escapeHtml(text.trim().substring(text.trim().match(/^\\S+\\s?/)?.[0]?.length || 0)) + '</div>';
+    }
+
+    let html = '';
+    const lines = text.split('\n');
+    let currentFiles = [];
+    let currentType = '';
+    let inDiff = false;
+    let diffLines = [];
+
+    function flushFiles() {
+      if (currentFiles.length === 0) return;
+      const typeClass = currentType === 'created' ? 'created' : currentType === 'modified' ? 'modified' : 'failed';
+      const icon = currentType === 'created' ? '📄' : currentType === 'modified' ? '✏️' : '❌';
+      html += '<ul class="ai-file-list">';
+      for (const f of currentFiles) {
+        html += '<li class="ai-file-item ' + typeClass + '"><span class="file-icon">' + icon + '</span><span class="file-path">' + escapeHtml(f) + '</span></li>';
+      }
+      html += '</ul>';
+      currentFiles = [];
+    }
+
+    function flushDiff() {
+      if (diffLines.length === 0) return;
+      html += '<div class="ai-diff-summary">';
+      for (const dl of diffLines) {
+        // Highlight specific diff parts
+        let line = escapeHtml(dl);
+        line = line.replace(/(✚\\s*\\d+\\s*lines?\\s*added)/g, '<span class="diff-added">$1</span>');
+        line = line.replace(/(─\\s*\\d+\\s*lines?\\s*removed)/g, '<span class="diff-removed">$1</span>');
+        line = line.replace(/(📏.*)/g, '<span class="diff-size">$1</span>');
+        if (/📋 Changes made to/.test(dl)) {
+          line = '<span class="diff-title">' + line + '</span>';
+        }
+        html += line + '\n';
+      }
+      html += '</div>';
+      diffLines = [];
+      inDiff = false;
+    }
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // Section headers: "✅ Created N files:", "🔧 Modified N files:", "⚠️ Failed"
+      const createdMatch = trimmed.match(/^(✅|\u2705)\\s*(Created|Generated)\\s+(\\d+)/i);
+      const modifiedMatch = trimmed.match(/^(🔧|\uD83D\uDD27)\\s*Modified\\s+(\\d+)/i);
+      const failedMatch = trimmed.match(/^(⚠️)\\s*Failed/i);
+
+      if (createdMatch) {
+        flushFiles(); flushDiff();
+        currentType = 'created';
+        html += '<div class="ai-section-header"><span class="section-icon">✅</span>' + escapeHtml(trimmed.replace(/^(✅|\u2705)\\s*/, '')) + '</div>';
+        continue;
+      }
+      if (modifiedMatch) {
+        flushFiles(); flushDiff();
+        currentType = 'modified';
+        html += '<div class="ai-section-header"><span class="section-icon">🔧</span>' + escapeHtml(trimmed.replace(/^(🔧|\uD83D\uDD27)\\s*/, '')) + '</div>';
+        continue;
+      }
+      if (failedMatch) {
+        flushFiles(); flushDiff();
+        currentType = 'failed';
+        html += '<div class="ai-section-header" style="color:#f48771"><span class="section-icon">⚠️</span>' + escapeHtml(trimmed.replace(/^⚠️\\s*/, '')) + '</div>';
+        continue;
+      }
+
+      // Diff block detection
+      if (/📋 Changes made to/.test(trimmed)) {
+        flushFiles();
+        inDiff = true;
+        diffLines.push(trimmed);
+        continue;
+      }
+      if (inDiff) {
+        if (trimmed === '' && diffLines.length > 3) {
+          flushDiff();
+        } else {
+          diffLines.push(trimmed);
+        }
+        continue;
+      }
+
+      // File path lines: "  📄 path/to/file" or "  ✏️ path" or "  ❌ path"
+      const fileLineMatch = trimmed.match(/^(📄|✏️|❌|📦)?\\s*(.+\\..{1,8})$/);
+      if (fileLineMatch && currentType) {
+        currentFiles.push(fileLineMatch[2].trim());
+        continue;
+      }
+
+      // Status lines like "⏳ ..."
+      if (/^(⏳|🔍|🖼️)/.test(trimmed)) {
+        flushFiles(); flushDiff();
+        html += '<div class="ai-status-line"><span class="status-icon">' + trimmed.substring(0, 2) + '</span>' + escapeHtml(trimmed.substring(2).trim()) + '</div>';
+        continue;
+      }
+
+      // Skip empty lines between sections
+      if (trimmed === '') {
+        flushFiles();
+        continue;
+      }
+
+      // Anything else: plain text
+      flushFiles(); flushDiff();
+      html += '<div class="ai-plain-text">' + escapeHtml(trimmed) + '</div>';
+    }
+    flushFiles();
+    flushDiff();
+    return html || '<div class="ai-plain-text">' + escapeHtml(text) + '</div>';
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   // Handle checkpoint banner
