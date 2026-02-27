@@ -126,7 +126,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         case 'sendMessage':
-          await this.handleUserMessage(data.message, data.attachedFiles || []);
+          await this.handleUserMessage(data.message, data.attachedFiles || [], data.localFiles || []);
           break;
 
         case 'sendImageMessage':
@@ -277,6 +277,73 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
+
+        case 'requestApiKeys': {
+          const models = GroqClient.AVAILABLE_MODELS;
+          const keys: Record<string, string> = {};
+          for (const m of models) {
+            // Use explicit per-model key only — no global fallback
+            // so models the user hasn't configured show blank in the UI
+            const k = this.groqClient.getExplicitApiKeyForModel(m.id);
+            if (k && k.trim()) {
+              const t = k.trim();
+              // Mask: show first 4 chars + bullets + last 4 chars
+              const bullets = '•'.repeat(Math.max(8, Math.min(20, t.length - 8)));
+              keys[m.id] = t.slice(0, 4) + bullets + t.slice(-4);
+            } else {
+              keys[m.id] = '';
+            }
+          }
+          this._view?.webview.postMessage({
+            type: 'apiKeysState',
+            keys,
+            activeModel: this.groqClient.getActiveModel(),
+          });
+          break;
+        }
+
+        case 'setApiKey': {
+          const { modelId, apiKey } = data;
+          if (!modelId || !apiKey?.trim()) {
+            this._view?.webview.postMessage({ type: 'apiKeyResult', success: false, message: 'No key provided.' });
+            break;
+          }
+          // Save the key immediately so it is usable right away
+          const cfg = vscode.workspace.getConfiguration('prompt2code');
+          const perModelKeys = { ...cfg.get<Record<string, string>>('apiKeys', {}) };
+          perModelKeys[modelId] = apiKey.trim();
+          await cfg.update('apiKeys', perModelKeys, vscode.ConfigurationTarget.Global);
+          const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
+          // Acknowledge save immediately so the UI updates without waiting for network
+          this._view?.webview.postMessage({
+            type: 'apiKeyResult', success: true,
+            message: `API key for ${modelLabel} saved.`,
+          });
+          // Validate in the background and show a non-blocking warning if the key looks invalid
+          this.groqClient.validateApiKey(apiKey.trim(), modelId).then(validation => {
+            if (!validation.valid) {
+              this._view?.webview.postMessage({
+                type: 'apiKeyResult', success: true,   // keep success=true so UI stays green
+                message: `Key saved — but validation warning: ${validation.error ?? 'key may be invalid. It will still be used.'}`
+              });
+            }
+          }).catch(() => { /* ignore network errors during background validation */ });
+          break;
+        }
+
+        case 'deleteApiKey': {
+          const { modelId } = data;
+          const cfg = vscode.workspace.getConfiguration('prompt2code');
+          const perModelKeys = { ...cfg.get<Record<string, string>>('apiKeys', {}) };
+          delete perModelKeys[modelId];
+          await cfg.update('apiKeys', perModelKeys, vscode.ConfigurationTarget.Global);
+          const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
+          this._view?.webview.postMessage({
+            type: 'apiKeyResult', success: true,
+            message: `Key for ${modelLabel} removed.`,
+          });
+          break;
+        }
       }
     });
   }
@@ -317,6 +384,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleModelSelection(modelId: string) {
     const modelInfo = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId);
     const modelLabel = modelInfo?.label ?? modelId;
+    const provider = GroqClient.getProviderForModel(modelId);
+    const provMeta = GroqClient.getProviderMeta(provider);
 
     // Check if this specific model already has a key (per-model or global fallback)
     let apiKey = this.groqClient.getApiKeyForModel(modelId);
@@ -324,9 +393,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!apiKey || apiKey.trim() === '') {
       // First time using this model — prompt for its API key
       const enteredKey = await vscode.window.showInputBox({
-        title: `API Key for ${modelLabel}`,
-        prompt: `Enter your Groq API key to use ${modelLabel}. Get one free at https://console.groq.com`,
-        placeHolder: 'gsk_...',
+        title: `${provMeta.name} API Key for ${modelLabel}`,
+        prompt: `Enter your ${provMeta.name} API key to use ${modelLabel}. Get one at ${provMeta.apiKeyUrl}`,
+        placeHolder: provMeta.placeholder,
         password: true,
         ignoreFocusOut: true,
       });
@@ -458,7 +527,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // MESSAGE HANDLING
   // ===========================
 
-  private async handleUserMessage(message: string, attachedFiles: string[] = []) {
+  private async handleUserMessage(message: string, attachedFiles: string[] = [], localFiles: { name: string; content: string }[] = []) {
     if (!message || !message.trim()) return;
 
     // Gate behind Google auth
@@ -470,7 +539,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    console.log('📨 Handling message:', message, 'mode:', this.currentMode, 'attached:', attachedFiles);
+    console.log('📨 Handling message:', message, 'mode:', this.currentMode, 'attached:', attachedFiles, 'local:', localFiles.map(f => f.name));
+
+    // Prepend any locally-uploaded file contents to the message as inline context
+    let enrichedMessage = message;
+    if (localFiles.length > 0) {
+      const localContext = localFiles
+        .map(f => `### Uploaded file: ${f.name}\n\`\`\`\n${f.content}\n\`\`\``)
+        .join('\n\n');
+      enrichedMessage = `${message}\n\n${localContext}`;
+    }
 
     // 1️⃣ Show user message immediately (checkpointId attached later for code-edit path)
     this._view?.webview.postMessage({
@@ -479,19 +557,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
 
     // 2️⃣ Save conversation (for chat mode history)
-    this.conversationHistory.push({ role: 'user', content: message });
+    this.conversationHistory.push({ role: 'user', content: enrichedMessage });
 
     // 3️⃣ Route to the appropriate handler based on mode
     switch (this.currentMode) {
       case 'ask':
-        await this.handleAskMode(message, attachedFiles);
+        await this.handleAskMode(enrichedMessage, attachedFiles);
         return;
       case 'plan':
-        await this.handlePlanMode(message, attachedFiles);
+        await this.handlePlanMode(enrichedMessage, attachedFiles);
         return;
       case 'agent':
       default:
-        await this.handleAgentMode(message, attachedFiles);
+        await this.handleAgentMode(enrichedMessage, attachedFiles);
         return;
     }
   }
@@ -508,7 +586,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const apiKey = this.groqClient.getApiKeyForModel(activeModel);
       if (!apiKey || apiKey.trim() === '') {
         const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
-        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown below to set its key.\n\nGet your free API key at: https://console.groq.com`);
+        const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
+        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
       }
 
       const fileRefs = extractFileReferences(message);
@@ -601,7 +680,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const apiKey = this.groqClient.getApiKeyForModel(activeModel);
       if (!apiKey || apiKey.trim() === '') {
         const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
-        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown below to set its key.\n\nGet your free API key at: https://console.groq.com`);
+        const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
+        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
       }
 
       const fileRefs = extractFileReferences(message);
@@ -727,7 +807,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       if (!apiKey || apiKey.trim() === '') {
         const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
-        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown below to set its key.\n\nGet your free API key at: https://console.groq.com`);
+        const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
+        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
       }
 
       // ── Resolve @file / #file: references ──
@@ -1337,8 +1418,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const globalKey = this.groqClient.getApiKeyForModel(this.groqClient.getActiveModel());
       if (!apiKey && !globalKey) {
         throw new Error(
-          '⚠️ No API key configured. Set a global API key or a key for the Llama 4 Scout (Vision) model.\n\n' +
-          'Get your free API key at: https://console.groq.com'
+          '⚠️ No API key configured. Set a key for the Llama 4 Scout (Vision) model in the Configure Tools panel.\n\n' +
+          'Get your free Groq API key at: https://console.groq.com'
         );
       }
 
@@ -1980,7 +2061,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtml(webview: vscode.Webview): string {
     const nonce = this.getNonce();
-    const paperclipUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'paperclip.png'));
     return `<!DOCTYPE html>
 <html lang="en" style="height:100%;">
 <head>
@@ -1990,391 +2070,120 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <style>
   * { box-sizing: border-box; }
   body {
-    margin: 0;
-    padding: 0;
+    margin: 0; padding: 0;
     font-family: var(--vscode-font-family);
     background: var(--vscode-sideBar-background);
     color: var(--vscode-foreground);
     height: 100%;
     display: flex;
     flex-direction: column;
+    position: relative;
   }
-  .header {
-    padding: 10px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid var(--vscode-panel-border);
+
+  /* ── Sessions Panel ── */
+  .sessions-panel { flex-shrink: 0; border-bottom: 1px solid var(--vscode-panel-border); }
+  .sessions-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 6px 5px 14px; min-height: 30px;
   }
-  .header-actions { display: flex; gap: 6px; }
-  #newChat {
-    padding: 6px 12px;
-    font-size: 20px;
-    font-weight: bold;
-    background: transparent;
-    color: var(--vscode-foreground);
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    transition: opacity 0.15s;
+  .sessions-title {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.8px;
+    text-transform: uppercase; color: var(--vscode-foreground); opacity: 0.65;
   }
-  #newChat:hover { opacity: 0.9; }
-  #close {
-    padding: 4px 8px;
-    font-size: 18px;
-    line-height: 1;
-    background: transparent;
-    color: var(--vscode-foreground);
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    opacity: 0.6;
-    transition: opacity 0.15s, background 0.15s;
+  .sessions-actions { display: flex; align-items: center; gap: 0; }
+  .session-icon-btn {
+    width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: none;
+    color: var(--vscode-foreground); opacity: 0.55;
+    cursor: pointer; border-radius: 4px; padding: 0; transition: all 0.15s;
   }
-  #close:hover {
-    opacity: 1;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
+  .session-icon-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1)); }
+  .sessions-list { overflow: hidden; }
+  .session-item {
+    display: flex; flex-direction: column;
+    padding: 5px 8px 5px 14px;
+    cursor: pointer; transition: background 0.12s; position: relative;
   }
+  .session-item:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.04)); }
+  .session-item.active { background: var(--vscode-list-activeSelectionBackground, rgba(255,255,255,0.07)); }
+  .session-item-top { display: flex; align-items: center; gap: 7px; }
+  .session-bullet {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--vscode-foreground); opacity: 0.35; flex-shrink: 0;
+  }
+  .session-title {
+    flex: 1; font-size: 12.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: var(--vscode-foreground); opacity: 0.9;
+  }
+  .session-icon { flex-shrink: 0; opacity: 0.35; display: flex; align-items: center; }
+  .session-item-bottom {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 1px; padding-left: 12px;
+  }
+  .session-status { font-size: 11px; opacity: 0.5; color: var(--vscode-foreground); }
+  .session-time { font-size: 11px; opacity: 0.38; color: var(--vscode-foreground); }
+  .sessions-footer { padding: 4px 14px 7px; }
+  .sessions-more-btn {
+    background: none; border: none; padding: 0;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--vscode-foreground); opacity: 0.55; cursor: pointer; transition: opacity 0.15s;
+  }
+  .sessions-more-btn:hover { opacity: 1; }
+
+  /* ── Chat area ── */
   .chat {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
+    flex: 1; overflow-y: auto; padding: 16px;
+    display: flex; flex-direction: column; gap: 20px;
   }
-  .msg {
-    margin-bottom: 14px;
-  }
+  .msg { margin-bottom: 0; max-width: 100%; }
   .msg .msg-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--vscode-foreground);
-    opacity: 0.85;
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; margin-bottom: 6px; display: block;
+    color: var(--vscode-foreground); opacity: 0.5;
   }
-  .msg.user .msg-label { opacity: 1; }
-  .msg.assistant .msg-label { opacity: 0.7; }
+  .msg.user .msg-label { color: var(--vscode-symbolIcon-methodForeground); opacity: 0.8; }
+  .msg.assistant .msg-label { color: var(--vscode-symbolIcon-keywordForeground); opacity: 0.8; }
   .bubble {
-    color: var(--vscode-foreground);
-    background: var(--vscode-editor-background);
-    padding: 8px 10px;
-    border-radius: 6px;
-    border: 1px solid var(--vscode-panel-border);
-    white-space: pre-wrap;
-    font-size: 13px;
-    line-height: 1.5;
+    color: var(--vscode-foreground); padding: 12px 16px;
+    border-radius: 12px; font-size: 13.5px; line-height: 1.6;
+    position: relative; word-wrap: break-word;
   }
   .msg.user .bubble {
-    background: var(--vscode-input-background, var(--vscode-editor-background));
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-panel-border); border-top-right-radius: 2px;
   }
-  .msg.assistant .bubble {
-    background: var(--vscode-editor-background);
-    border-color: transparent;
-  }
-  .msg-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 3px;
-  }
-  .msg-actions {
-    display: flex;
-    gap: 2px;
-  }
+  .msg.assistant .bubble { background: transparent; padding-left: 0; padding-right: 0; border-radius: 0; }
+  .msg-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .msg-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.2s ease; }
+  .msg:hover .msg-actions { opacity: 1; }
   .msg-actions button {
-    background: none;
-    border: none;
-    color: var(--vscode-foreground);
-    opacity: 0;
-    cursor: pointer;
-    font-size: 13px;
-    padding: 3px 5px;
-    border-radius: 3px;
-    transition: opacity 0.15s, background 0.15s;
+    background: transparent; border: none; color: var(--vscode-foreground);
+    cursor: pointer; padding: 4px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0.6; transition: all 0.2s;
   }
-  .msg-actions button svg {
-    width: 14px;
-    height: 14px;
-    fill: currentColor;
-    vertical-align: middle;
-  }
-  .msg-actions button .check-icon { display: none; }
-  .msg-actions button.done svg { display: none; }
-  .msg-actions button.done .check-icon { display: inline; }
-  .msg:hover .msg-actions button { opacity: 0.55; }
-  .msg-actions button:hover {
-    opacity: 1 !important;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
-  }
-  .msg-actions button.restore-btn:hover {
-    color: #f48771;
-  }
+  .msg-actions button:hover { opacity: 1 !important; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1)); }
+  .msg-actions button svg { width: 14px; height: 14px; }
+  .msg-actions button.restore-btn:hover { color: #f48771; }
+
   /* Checkpoint banner */
   .checkpoint-banner {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 8px 12px;
-    margin: 8px 0;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 8px 12px; margin: 8px 0;
     background: var(--vscode-editorWidget-background, #252526);
-    border: 1px solid var(--vscode-panel-border);
-    border-radius: 6px;
-    font-size: 12px;
+    border: 1px solid var(--vscode-panel-border); border-radius: 6px; font-size: 12px;
   }
-  .checkpoint-banner button {
-    padding: 4px 12px;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-  }
-  .btn-keep {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-  }
-  .btn-discard {
-    background: var(--vscode-button-secondaryBackground, #3a3d41);
-    color: var(--vscode-button-secondaryForeground, #fff);
-  }
-  .btn-keep:hover { opacity: 0.9; }
-  .btn-discard:hover { opacity: 0.9; }
-  /* ── Copilot-style chat input ── */
-  .chat-input-wrapper {
-    padding: 12px;
-    border-top: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-sideBar-background);
-  }
-  .chat-input-container {
-    display: flex;
-    flex-direction: column;
-    border-radius: 8px;
-    background: var(--vscode-input-background, var(--vscode-editor-background));
-    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-    transition: border-color 0.15s;
-    overflow: hidden;
-  }
-  .chat-input-container:focus-within {
-    border-color: var(--vscode-focusBorder);
-  }
-  .mode-selector-compact {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-input-background, var(--vscode-editor-background));
-  }
-  .mode-tabs {
-    display: flex;
-    gap: 2px;
-  }
-  .mode-tab {
-    padding: 4px 10px;
-    font-size: 12px;
-    background: transparent;
-    border: none;
-    color: var(--vscode-foreground);
-    cursor: pointer;
-    border-radius: 4px;
-    opacity: 0.6;
-    transition: opacity 0.15s, background 0.15s;
-  }
-  .mode-tab:hover {
-    opacity: 0.85;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.05));
-  }
-  .mode-tab.active {
-    opacity: 1;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    font-weight: 500;
-  }
-  .mode-hint-text {
-    font-size: 10px;
-    opacity: 0.5;
-  }
-  .add-context-btn-inner {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--vscode-panel-border);
-    color: var(--vscode-foreground);
-    cursor: pointer;
-    font-size: 12px;
-    text-align: left;
-    transition: background 0.15s;
-    width: 100%;
-  }
-  .add-context-btn-inner:hover {
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.03));
-  }
-  .add-context-btn-inner .icon {
-    font-size: 14px;
-    opacity: 0.7;
-  }
-  .chat-input-area {
-    padding: 10px 12px;
-  }
-  .chat-input-area {
-    padding: 10px 12px;
-  }
-  .chat-input-area textarea {
-    width: 100%;
-    resize: none;
-    min-height: 32px;
-    max-height: 140px;
-    padding: 0;
-    border: none;
-    outline: none;
-    background: transparent;
-    color: var(--vscode-foreground);
-    font-family: var(--vscode-font-family);
-    font-size: 13px;
-    line-height: 1.5;
-    overflow-y: auto;
-  }
-  .chat-input-area textarea::placeholder {
-    color: var(--vscode-input-placeholderForeground);
-    opacity: 0.6;
-  }
-  .chat-input-area textarea:disabled {
-    opacity: 0.5;
-  }
-  .chat-input-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border-top: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-input-background, var(--vscode-editor-background));
-  }
-  .toolbar-left {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex: 1;
-  }
-  .toolbar-btn {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    border: none;
-    background: transparent;
-    color: var(--vscode-foreground);
-    cursor: pointer;
-    font-size: 13px;
-    opacity: 0.7;
-    transition: opacity 0.15s, background 0.15s;
-  }
-  .toolbar-btn:hover {
-    opacity: 1;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
-  }
-  .toolbar-btn .icon {
-    font-size: 16px;
-  }
-  .toolbar-select {
-    padding: 4px 8px;
-    border-radius: 4px;
-    border: none;
-    background: transparent;
-    color: var(--vscode-foreground);
-    cursor: pointer;
-    font-size: 13px;
-    opacity: 0.85;
-    transition: opacity 0.15s, background 0.15s;
-  }
-  .toolbar-select:hover {
-    opacity: 1;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
-  }
-  .toolbar-select option {
-    background: #1e1e1e;
-    color: var(--vscode-foreground);
-  }
-  .image-preview-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    background: var(--vscode-editor-background);
-    border: 1px solid var(--vscode-panel-border);
-    border-radius: 8px;
-    margin-bottom: 4px;
-  }
-  .image-preview-bar img {
-    max-width: 80px;
-    max-height: 60px;
-    border-radius: 4px;
-    border: 1px solid var(--vscode-panel-border);
-    object-fit: cover;
-  }
-  .image-preview-bar .img-name {
-    flex: 1;
-    font-size: 12px;
-    opacity: 0.8;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .image-preview-bar .img-remove {
-    cursor: pointer;
-    font-size: 16px;
-    opacity: 0.7;
-    padding: 2px 4px;
-    border-radius: 4px;
-  }
-  .image-preview-bar .img-remove:hover {
-    opacity: 1;
-    background: var(--vscode-button-secondaryBackground);
-  }
-  .toolbar-send-btn {
-    width: 32px;
-    height: 32px;
-    min-width: 32px;
-    border-radius: 6px;
-    border: none;
-    background: transparent;
-    color: var(--vscode-foreground);
-    cursor: pointer;
-    font-size: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    transition: opacity 0.15s;
-  }
-  .toolbar-send-btn:hover {
-    opacity: 0.9;
-  }
-  .toolbar-send-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-  button {
-    padding: 8px 14px;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border: none;
-    cursor: pointer;
-    border-radius: 4px;
-  }
-  button:disabled {
-    opacity: 0.5;
-  }
-  .hint {
-    padding: 4px 12px;
-    font-size: 11px;
-    opacity: 0.6;
-  }
+  .checkpoint-banner button { padding: 4px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .btn-keep { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .btn-discard { background: var(--vscode-button-secondaryBackground, #3a3d41); color: var(--vscode-button-secondaryForeground, #fff); }
+  .btn-keep:hover, .btn-discard:hover { opacity: 0.9; }
+
+  /* Loading / typing */
   .loading-bar {
-    height: 3px;
-    background: var(--vscode-progressBar-background, #007acc);
-    animation: loading-pulse 1.5s ease-in-out infinite;
-    display: none;
+    height: 3px; background: var(--vscode-progressBar-background, #007acc);
+    animation: loading-pulse 1.5s ease-in-out infinite; display: none; flex-shrink: 0;
   }
   .loading-bar.active { display: block; }
   @keyframes loading-pulse {
@@ -2382,221 +2191,325 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     50%  { width: 60%; margin-left: 20%; }
     100% { width: 10%; margin-left: 90%; }
   }
-  .typing {
-    display: none;
-    padding: 8px 12px;
-    font-size: 12px;
-    opacity: 0.7;
-    animation: blink 1s step-end infinite;
-  }
+  .typing { display: none; padding: 8px 16px; font-size: 12px; opacity: 0.7; animation: blink 1s step-end infinite; flex-shrink: 0; }
   .typing.active { display: block; }
-  @keyframes blink {
-    50% { opacity: 0.3; }
-  }
-  /* ── File chip / attachment area ── */
-  .attached-files {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    padding: 4px 10px 0;
-  }
-  .file-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    background: var(--vscode-badge-background, #4d4d4d);
-    color: var(--vscode-badge-foreground, #fff);
-    border-radius: 10px;
-    font-size: 11px;
-    max-width: 220px;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    border: 1px solid var(--vscode-panel-border);
-  }
-  .file-chip .icon {
-    opacity: 0.7;
-    font-size: 12px;
-    flex-shrink: 0;
-  }
-  .file-chip .name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .file-chip .lang-badge {
-    font-size: 9px;
-    padding: 0 4px;
-    border-radius: 3px;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    flex-shrink: 0;
-    text-transform: uppercase;
-  }
-  .file-chip .remove {
-    cursor: pointer;
-    opacity: 0.5;
-    flex-shrink: 0;
-    font-size: 13px;
-    line-height: 1;
-  }
-  .file-chip .remove:hover { opacity: 1; }
-  /* ── Plan execute button ── */
-  .plan-actions {
-    display: flex;
-    gap: 6px;
-    margin-top: 8px;
-    padding-top: 8px;
+  @keyframes blink { 50% { opacity: 0.3; } }
+
+  /* ── Copilot-style chat input ── */
+  .chat-input-wrapper {
+    padding: 10px 11px 11px; flex-shrink: 0;
     border-top: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-sideBar-background);
+    position: relative;
   }
-  .plan-actions button {
-    padding: 5px 14px;
-    font-size: 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    border: none;
+  .chat-input-container {
+    display: flex; flex-direction: column;
+    border-radius: 10px;
+    background: var(--vscode-input-background, var(--vscode-editor-background));
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+    transition: border-color 0.2s; overflow: visible;
   }
-  .plan-execute-btn {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
+  .chat-input-container:focus-within { border-color: var(--vscode-focusBorder); }
+
+  /* Top row: paperclip + chips + textarea */
+  .input-main {
+    display: flex; align-items: flex-start;
+    padding: 9px 10px 6px; gap: 6px;
   }
+  .attach-btn {
+    flex-shrink: 0; width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: none; color: var(--vscode-foreground);
+    opacity: 0.55; cursor: pointer; border-radius: 5px; padding: 0; margin-top: 1px;
+    transition: all 0.15s;
+  }
+  .attach-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08)); }
+  .input-content { flex: 1; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+
+  /* Inline file chips (Copilot-style) */
+  .inline-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .inline-chips:empty { display: none; }
+  .file-chip {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 2px 6px 2px 4px;
+    background: var(--vscode-badge-background, rgba(128,128,128,0.14));
+    color: var(--vscode-badge-foreground, var(--vscode-foreground));
+    border-radius: 4px; font-size: 11.5px; max-width: 190px;
+    border: 1px solid var(--vscode-panel-border); transition: background 0.12s; cursor: default;
+  }
+  .file-chip:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
+  .file-chip .chip-plus { opacity: 0.65; font-size: 12px; line-height: 1; font-weight: 600; }
+  .file-chip .lang-badge {
+    font-size: 9.5px; font-weight: 700; padding: 0 3px; border-radius: 3px;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+    flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .file-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-chip .chip-remove { cursor: pointer; opacity: 0.4; font-size: 13px; line-height: 1; margin-left: 2px; flex-shrink: 0; }
+  .file-chip .chip-remove:hover { opacity: 1; }
+
+  /* Textarea */
+  .input-content textarea {
+    width: 100%; resize: none; min-height: 20px; max-height: 160px;
+    padding: 0; border: none; outline: none; background: transparent;
+    color: var(--vscode-foreground); font-family: var(--vscode-font-family);
+    font-size: 13px; line-height: 1.5; overflow-y: auto;
+  }
+  .input-content textarea::placeholder {
+    color: var(--vscode-input-placeholderForeground, rgba(128,128,128,0.58));
+  }
+  /* Image preview bar */
+  #imagePreview { overflow: hidden; }
+  .image-preview-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-top: 1px solid var(--vscode-panel-border); font-size: 12px;
+  }
+  .image-preview-bar img { height: 36px; border-radius: 4px; object-fit: cover; }
+  .img-name { opacity: 0.7; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .img-remove { cursor: pointer; opacity: 0.5; font-size: 16px; }
+  .img-remove:hover { opacity: 1; }
+
+  /* Toolbar */
+  .chat-input-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 7px 6px; gap: 2px;
+  }
+  .toolbar-left { display: flex; align-items: center; gap: 1px; min-width: 0; overflow: hidden; }
+  .toolbar-right { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+
+  /* Toolbar dropdown buttons (monitor, code-icon, model) */
+  .toolbar-dropdown-btn {
+    display: flex; align-items: center; gap: 3px;
+    padding: 3px 5px; background: transparent; border: none;
+    color: var(--vscode-foreground); cursor: pointer; border-radius: 5px;
+    opacity: 0.62; font-size: 12px; font-family: var(--vscode-font-family);
+    transition: all 0.12s; white-space: nowrap;
+  }
+  .toolbar-dropdown-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08)); }
+  .toolbar-model-btn {
+    display: flex; align-items: center; gap: 3px;
+    padding: 3px 5px; background: transparent; border: none;
+    color: var(--vscode-foreground); cursor: pointer; border-radius: 5px;
+    opacity: 0.72; font-size: 12px; font-family: var(--vscode-font-family);
+    transition: all 0.12s; max-width: 140px; white-space: nowrap; overflow: hidden;
+  }
+  .toolbar-model-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08)); }
+  .toolbar-model-btn > span { overflow: hidden; text-overflow: ellipsis; }
+  .dropdown-caret { opacity: 0.6; flex-shrink: 0; }
+
+  .toolbar-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 5px; border: none;
+    background: transparent; color: var(--vscode-foreground);
+    cursor: pointer; opacity: 0.58; padding: 0; transition: all 0.12s;
+  }
+  .toolbar-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08)); }
+
+  .toolbar-send-btn {
+    width: 28px; height: 28px; min-width: 28px;
+    border-radius: 6px; border: none;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: opacity 0.12s; padding: 0;
+  }
+  .toolbar-send-btn:hover { opacity: 0.85; }
+  .toolbar-send-btn:active { opacity: 0.7; }
+  .toolbar-send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  /* Floating model / mode picker */
+  .floating-picker {
+    display: none; position: absolute; z-index: 200;
+    background: var(--vscode-dropdown-background, var(--vscode-editorWidget-background, #252526));
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+    border-radius: 6px; overflow: hidden; min-width: 160px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  }
+  .floating-picker.open { display: block; }
+  .picker-item {
+    display: block; width: 100%; text-align: left;
+    padding: 7px 14px; border: none; background: transparent;
+    color: var(--vscode-foreground); font-size: 12px;
+    font-family: var(--vscode-font-family); cursor: pointer; opacity: 0.85;
+    transition: background 0.12s; white-space: nowrap;
+  }
+  .picker-item:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.07)); opacity: 1; }
+  .picker-item.selected { opacity: 1; font-weight: 600; }
+  .picker-item .picker-check {
+    display: inline-block; width: 14px; margin-right: 4px;
+    font-size: 11px; opacity: 0.8;
+  }
+
+  /* Plan actions */
+  .plan-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
+  .plan-actions button { padding: 5px 14px; font-size: 12px; border-radius: 4px; cursor: pointer; border: none; }
+  .plan-execute-btn { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .plan-execute-btn:hover { opacity: 0.9; }
-  .plan-copy-btn {
-    background: var(--vscode-button-secondaryBackground, #3a3d41);
-    color: var(--vscode-button-secondaryForeground, #fff);
-  }
+  .plan-copy-btn { background: var(--vscode-button-secondaryBackground, #3a3d41); color: var(--vscode-button-secondaryForeground, #fff); }
   .plan-copy-btn:hover { opacity: 0.9; }
-  /* ── Diff summary styling in bubble ── */
-  .bubble .diff-summary {
-    font-family: var(--vscode-editor-font-family, monospace);
-    font-size: 12px;
-    line-height: 1.6;
-  }
+  .bubble .diff-summary { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.6; }
+
   /* ── Login overlay ── */
   .login-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 999;
+    position: absolute; inset: 0; z-index: 999;
     background: var(--vscode-sideBar-background);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-    padding: 24px;
-    text-align: center;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; padding: 24px; text-align: center;
   }
   .login-overlay.hidden { display: none !important; }
-  .login-overlay .logo {
-    font-size: 36px;
-    margin-bottom: 4px;
-  }
-  .login-overlay h2 {
-    margin: 0;
-    font-size: 18px;
-    color: var(--vscode-foreground);
-  }
-  .login-overlay p {
-    margin: 0;
-    font-size: 13px;
-    opacity: 0.65;
-    max-width: 260px;
-    line-height: 1.5;
-  }
+  .login-overlay .logo { font-size: 36px; margin-bottom: 4px; }
+  .login-overlay h2 { margin: 0; font-size: 18px; color: var(--vscode-foreground); }
+  .login-overlay p { margin: 0; font-size: 13px; opacity: 0.65; max-width: 260px; line-height: 1.5; }
   .google-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 24px;
-    background: #4285f4;
-    color: #fff;
-    font-size: 14px;
-    font-weight: 600;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: opacity 0.15s, transform 0.1s;
-    margin-top: 8px;
+    display: inline-flex; align-items: center; gap: 10px; padding: 10px 24px;
+    background: #4285f4; color: #fff; font-size: 14px; font-weight: 600;
+    border: none; border-radius: 6px; cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s; margin-top: 8px;
   }
   .google-btn:hover { opacity: 0.92; transform: translateY(-1px); }
   .google-btn:active { transform: translateY(0); }
-  .google-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-    transform: none;
-  }
+  .google-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
   .google-btn .g-icon {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 13px;
+    width: 20px; height: 20px; border-radius: 50%; background: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
   }
-  /* ── User avatar bar (shown when signed in) ── */
+
+  /* ── User bar ── */
   .user-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    font-size: 12px;
-    border-bottom: 1px solid var(--vscode-panel-border);
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; font-size: 12px;
+    border-bottom: 1px solid var(--vscode-panel-border); flex-shrink: 0;
   }
   .user-bar.hidden { display: none !important; }
-  .user-bar img {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    border: 1px solid var(--vscode-panel-border);
-  }
-  .user-bar .user-name {
-    flex: 1;
-    opacity: 0.85;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
+  .user-bar img { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--vscode-panel-border); }
+  .user-bar .user-name { flex: 1; opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .user-bar .sign-out-btn {
-    background: none;
-    border: none;
-    color: var(--vscode-foreground);
-    opacity: 0.5;
-    cursor: pointer;
-    font-size: 11px;
-    padding: 2px 6px;
-    border-radius: 3px;
-    transition: all 0.2s;
+    background: none; border: none; color: var(--vscode-foreground);
+    opacity: 0.5; cursor: pointer; font-size: 11px;
+    padding: 2px 6px; border-radius: 3px; transition: all 0.15s;
   }
-  .user-bar .sign-out-btn:hover {
-    opacity: 1;
-    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
-  }
-  .user-bar .sign-out-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-  
-  /* Responsive Design */
-  @media (max-width: 400px) {
-    .header { padding: 10px 12px; }
-    .sessions-section { max-height: 140px; }
-    .chat { padding: 12px; }
-    .msg { margin-bottom: 16px; }
-    .bubble { font-size: 12px; padding: 8px 10px; }
-    .toolbar-left { flex-wrap: wrap; gap: 4px; }
-    .toolbar-select { font-size: 11px; padding: 3px 6px; }
-  }
+  .user-bar .sign-out-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1)); }
+  .user-bar .sign-out-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* Generic button reset for checkpoint banner etc. */
+  button { padding: 8px 14px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; cursor: pointer; border-radius: 4px; }
+  button:disabled { opacity: 0.5; }
+
   @media (max-width: 300px) {
-    .toolbar-left { width: 100%; }
-    .toolbar-select { flex: 1; min-width: 0; }
+    .toolbar-model-btn { max-width: 80px; }
+    .toolbar-dropdown-btn { padding: 3px 3px; }
   }
+
+  /* ── Settings / Configure-Tools Modal ── */
+  .settings-backdrop {
+    display: none; position: absolute; inset: 0; z-index: 500;
+    background: rgba(0,0,0,0.45);
+  }
+  .settings-backdrop.open { display: block; }
+  .settings-modal {
+    position: absolute; inset: 0; z-index: 501;
+    display: none; flex-direction: column;
+    background: var(--vscode-sideBar-background);
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 0;
+    overflow: hidden;
+  }
+  .settings-modal.open { display: flex; }
+  .settings-modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-bottom: 1px solid var(--vscode-panel-border);
+    flex-shrink: 0;
+  }
+  .settings-modal-header h3 {
+    margin: 0; font-size: 13px; font-weight: 700; letter-spacing: 0.2px;
+    color: var(--vscode-foreground);
+  }
+  .settings-close-btn {
+    width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+    background: transparent; border: none; color: var(--vscode-foreground);
+    cursor: pointer; opacity: 0.55; border-radius: 4px; padding: 0; font-size: 18px;
+    line-height: 1; transition: opacity 0.12s;
+  }
+  .settings-close-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1)); }
+  .settings-modal-body { flex: 1; overflow-y: auto; padding: 14px; }
+  .settings-section-title {
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px;
+    opacity: 0.5; margin: 0 0 10px; color: var(--vscode-foreground);
+  }
+  .model-key-row {
+    display: flex; flex-direction: column; gap: 5px;
+    padding: 10px 0; border-bottom: 1px solid var(--vscode-panel-border);
+  }
+  .model-key-row:last-child { border-bottom: none; }
+  .model-key-top { display: flex; align-items: center; gap: 8px; }
+  .model-key-name { flex: 1; font-size: 12.5px; font-weight: 600; color: var(--vscode-foreground); }
+  .model-key-ctx {
+    font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+    background: var(--vscode-badge-background, rgba(128,128,128,0.15));
+    color: var(--vscode-badge-foreground, var(--vscode-foreground));
+    opacity: 0.75; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .model-key-status {
+    font-size: 11px; font-weight: 600; flex-shrink: 0;
+  }
+  .model-key-status.set   { color: #3dc965; }
+  .model-key-status.unset { color: var(--vscode-foreground); opacity: 0.38; }
+  .model-key-input-row { display: flex; gap: 5px; }
+  .model-key-eye-btn {
+    padding: 5px 8px; border-radius: 5px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+    background: var(--vscode-input-background); color: var(--vscode-foreground); cursor: pointer;
+    flex-shrink: 0; opacity: 0.6; transition: opacity 0.12s; display: flex; align-items: center; justify-content: center;
+  }
+  .model-key-eye-btn:hover { opacity: 1; }
+  .model-key-input {
+    flex: 1; padding: 5px 8px;
+    background: var(--vscode-input-background); color: var(--vscode-foreground);
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+    border-radius: 5px; font-size: 12px; font-family: var(--vscode-font-family);
+    outline: none; min-width: 0;
+  }
+  .model-key-input:focus { border-color: var(--vscode-focusBorder); }
+  .model-key-save-btn {
+    padding: 5px 12px; border-radius: 5px; border: none; cursor: pointer; font-size: 12px;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+    transition: opacity 0.12s; flex-shrink: 0; font-family: var(--vscode-font-family);
+  }
+  .model-key-save-btn:hover { opacity: 0.85; }
+  .model-key-del-btn {
+    padding: 5px 8px; border-radius: 5px; border: none; cursor: pointer; font-size: 12px;
+    background: transparent; color: var(--vscode-foreground); opacity: 0.45;
+    transition: opacity 0.12s; flex-shrink: 0; font-family: var(--vscode-font-family);
+    display: none;
+  }
+  .model-key-del-btn.visible { display: block; }
+  .model-key-del-btn:hover { opacity: 1; color: #f48771; }
+  .provider-section-header {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--vscode-foreground); opacity: 0.45;
+    padding: 12px 0 4px 0; margin-bottom: 2px;
+    border-top: 1px solid var(--vscode-panel-border);
+  }
+  .provider-section-header:first-child { border-top: none; padding-top: 2px; }
+  .settings-active-badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 3px;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+    font-weight: 600; margin-left: 4px;
+  }
+  .model-key-set-active-btn {
+    padding: 3px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer;
+    background: transparent; color: var(--vscode-foreground); opacity: 0.5;
+    font-family: var(--vscode-font-family); transition: all 0.12s; flex-shrink: 0;
+  }
+  .model-key-set-active-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08)); }
+  .settings-msg {
+    font-size: 11.5px; padding: 4px 0; opacity: 0.7; min-height: 18px; color: var(--vscode-foreground);
+  }
+  .settings-msg.ok  { color: #3dc965; opacity: 1; }
+  .settings-msg.err { color: #f48771; opacity: 1; }
 </style>
 </head>
 
-<body>
-  <!-- LOGIN OVERLAY — hides the chat until user signs in -->
+<body style="position:relative;">
+  <!-- LOGIN OVERLAY -->
   <div class="login-overlay" id="loginOverlay">
     <div class="logo">🚀</div>
     <h2>Welcome to Prompt2Code</h2>
@@ -2610,64 +2523,147 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="user-bar hidden" id="userBar">
     <img id="userAvatar" src="" alt="" />
     <span class="user-name" id="userName"></span>
-    <button class="sign-out-btn" id="signOutBtn"> Sign out</button>
+    <button class="sign-out-btn" id="signOutBtn">Sign out</button>
   </div>
 
-  <div class="header">
-    <strong>Prompt2Code</strong>
-    <div class="header-actions">
-      <button id="newChat" title="Start a new chat">+</button>
-      <button id="close" title="Close panel">×</button>
-    </div>
-  </div>
-
-  <div class="hint">
-    <b>@file</b> to include files &middot;
-    <b>@workspace</b> for project tree &middot;
-    <b>"create file …"</b> to create new files
-  </div>
-
-  <div class="loading-bar" id="loadingBar"></div>
-
-  <div class="chat" id="chat"></div>
-
-  <div class="typing" id="typingIndicator">⏳ Working… generating code in the editor</div>
-  <div class="attached-files" id="attachedFiles"></div>
-  <div class="chat-input-wrapper">
-    <div class="chat-input-container">
-      <button class="add-context-btn-inner" id="addContextBtn">
-        <span class="icon">📎</span>
-        <span>Add Context...</span>
-      </button>
-      <div class="chat-input-area">
-        <textarea id="input" rows="1" placeholder="Describe what to build next"></textarea>
-      </div>
-      <div id="imagePreview" style="display:none"></div>
-      <div class="chat-input-toolbar">
-        <div class="toolbar-left">
-          
-          <button class="toolbar-btn" id="addImage" title="Upload UI screenshot">
-            <img src="${paperclipUri}" alt="Attach" style="width:18px;height:18px;opacity:0.85;" />
-          </button>
-          <select class="toolbar-select" id="modeSelect">
-            <option value="ask">Ask</option>
-            <option value="agent" selected>Agent</option>
-            <option value="plan">Plan</option>
-          </select>
-          <select class="toolbar-select" id="modelSelect">
-            <option>Loading…</option>
-          </select>
-        </div>
-        <button id="send" class="toolbar-send-btn" title="Send" aria-label="Send">
-          <span class="send-icon" aria-hidden="true">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M3 17L17 10L3 3V8.5L13 10L3 11.5V17Z" fill="currentColor"/>
-            </svg>
-          </span>
+  <!-- SESSIONS PANEL -->
+  <div class="sessions-panel" id="sessionsPanel">
+    <div class="sessions-header">
+      <span class="sessions-title">SESSIONS</span>
+      <div class="sessions-actions">
+        <!-- New chat: compose / pencil-plus icon -->
+        <button class="session-icon-btn" id="newChat" title="New chat">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M13.23 1h-1.46L3.52 9.25l-.16.22L1 13.59 2.41 15l4.12-2.36.22-.16L15 4.23V2.77L13.23 1zM2.41 13.59l1.51-3 1.45 1.45-2.96 1.55zm3.83-2.06L4.47 9.76l8-8 1.77 1.77-8 8z"/>
+          </svg>
+        </button>
+        <!-- Search: magnifying glass -->
+        <button class="session-icon-btn" title="Search sessions">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0zm-.82 4.74a5.5 5.5 0 1 1 .71-.71l3.33 3.32-.7.71-3.34-3.32z"/>
+          </svg>
+        </button>
+        <!-- Filter: funnel -->
+        <button class="session-icon-btn" title="Filter sessions">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M1 2h14l-5.2 6.24V14l-3.6-1.8V8.24L1 2zm1.4 1L7.2 8.76V11.8l1.6.8V8.76L13.6 3H2.4z"/>
+          </svg>
+        </button>
+        <!-- Layout toggle: split-panel / sidebar -->
+        <button class="session-icon-btn" title="Toggle layout">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M2 2h12a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm0 1v10h5V3H2zm6 0v10h6V3H8z"/>
+          </svg>
         </button>
       </div>
     </div>
+    <div class="sessions-list" id="sessionsList"></div>
+    <div class="sessions-footer" id="sessionsFooter" style="display:none">
+      <button class="sessions-more-btn" id="sessionsMoreBtn"></button>
+    </div>
+  </div>
+
+  <div class="loading-bar" id="loadingBar"></div>
+  <div class="chat" id="chat"></div>
+  <div class="typing" id="typingIndicator">⏳ Working… generating code in the editor</div>
+
+  <!-- Copilot-style chat input -->
+  <div class="chat-input-wrapper">
+    <div class="chat-input-container">
+      <!-- Top: paperclip + inline chips + textarea -->
+      <div class="input-main">
+        <!-- Attach / upload files: paperclip -->
+        <button class="attach-btn" id="addContextBtn" title="Attach files or upload">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M21.59 11.59l-9.17 9.17a6 6 0 0 1-8.49-8.49l8.18-8.18a4 4 0 0 1 5.66 5.66L9.6 17.92a2 2 0 0 1-2.83-2.83l7.07-7.07-1.41-1.41-7.07 7.07a4 4 0 0 0 5.65 5.65l8.18-8.18a6 6 0 0 0-8.49-8.49L2.52 11.1a8 8 0 0 0 11.31 11.31l9.17-9.17-1.41-1.41z"/>
+          </svg>
+        </button>
+        <div class="input-content">
+          <div class="inline-chips" id="attachedFiles"></div>
+          <textarea id="input" rows="1" placeholder="Describe what to build next"></textarea>
+        </div>
+      </div>
+      <div id="imagePreview" style="display:none"></div>
+      <!-- Toolbar -->
+      <div class="chat-input-toolbar">
+        <div class="toolbar-left">
+          <!-- Upload file from local system -->
+          <button class="toolbar-btn" id="uploadLocalFileBtn" title="Upload file from your computer">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M7.5 1.5a.5.5 0 0 1 1 0V8h2.793l-3.293-3.293a.5.5 0 0 1 .707-.707l4 4a.5.5 0 0 1 0 .707l-4 4a.5.5 0 0 1-.707-.707L10.293 9H8.5v4.5a.5.5 0 0 1-1 0V9H5.707l3.293-3.293V1.5z" style="display:none"/>
+              <path d="M8 1l3.5 4H9.5v5h-3V5H4.5L8 1zM3 12h10v1H3v-1z"/>
+            </svg>
+          </button>
+          <input type="file" id="localFileInput" multiple style="display:none" />
+          <!-- Mode picker: same style as model button -->
+          <button class="toolbar-model-btn" id="modeMenuBtn" title="Chat mode (Ask / Agent / Plan)">
+            <span id="modeLabel">Agent</span>
+            <svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor" class="dropdown-caret">
+              <path d="M8 10.5L3 5.5h10L8 10.5z"/>
+            </svg>
+          </button>
+          <!-- Model selector -->
+          <button class="toolbar-model-btn" id="modelMenuBtn" title="Select model">
+            <span id="modelLabel">Loading…</span>
+            <svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor" class="dropdown-caret">
+              <path d="M8 10.5L3 5.5h10L8 10.5z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="toolbar-right">
+          <!-- Tools / configure: sliders tune icon -->
+          <button class="toolbar-btn" id="toolsBtn" title="Configure tools">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M3.5 2a.5.5 0 0 1 .5.5V5h1.5a.5.5 0 0 1 0 1H4v7.5a.5.5 0 0 1-1 0V6H1.5a.5.5 0 0 1 0-1H3V2.5a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5V7h1.5a.5.5 0 0 1 0 1H9v5.5a.5.5 0 0 1-1 0V8H6.5a.5.5 0 0 1 0-1H8V2.5a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v2h1.5a.5.5 0 0 1 0 1H14v8.5a.5.5 0 0 1-1 0V5.5h-1.5a.5.5 0 0 1 0-1H13V2.5a.5.5 0 0 1 .5-.5z"/>
+            </svg>
+          </button>
+          <!-- Send: paper-plane / send arrow -->
+          <button id="send" class="toolbar-send-btn" title="Send message (Enter)" aria-label="Send">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M1 1.5l14 6.5-14 6.5.92-6.5L1 1.5zm1.38 1.34L2.62 7H9V6L2.38 2.84zm.24 7.82L9 9v-1l-6.38-.84L2.62 11.16z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
     <input type="file" id="imageInput" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" />
+    <!-- Hidden selects for backward-compat -->
+    <select id="modeSelect" style="display:none">
+      <option value="ask">Ask</option>
+      <option value="agent" selected>Agent</option>
+      <option value="plan">Plan</option>
+    </select>
+    <select id="modelSelect" style="display:none"><option>Loading…</option></select>
+    <!-- Floating pickers -->
+    <div class="floating-picker" id="modePicker">
+      <button class="picker-item" data-mode="ask"><span class="picker-check"></span>Ask</button>
+      <button class="picker-item selected" data-mode="agent"><span class="picker-check">✓</span>Agent</button>
+      <button class="picker-item" data-mode="plan"><span class="picker-check"></span>Plan</button>
+    </div>
+    <style>
+      #modePicker { min-width: 120px; }
+    </style>
+    <div class="floating-picker" id="modelPicker"></div>
+  </div>
+
+  <!-- Settings / Configure-tools modal -->
+  <div class="settings-backdrop" id="settingsBackdrop"></div>
+  <div class="settings-modal" id="settingsModal">
+    <div class="settings-modal-header">
+      <h3>
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle;margin-right:6px;opacity:0.75">
+          <path d="M3.5 2a.5.5 0 0 1 .5.5V5h1.5a.5.5 0 0 1 0 1H4v7.5a.5.5 0 0 1-1 0V6H1.5a.5.5 0 0 1 0-1H3V2.5a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5V7h1.5a.5.5 0 0 1 0 1H9v5.5a.5.5 0 0 1-1 0V8H6.5a.5.5 0 0 1 0-1H8V2.5a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v2h1.5a.5.5 0 0 1 0 1H14v8.5a.5.5 0 0 1-1 0V5.5h-1.5a.5.5 0 0 1 0-1H13V2.5a.5.5 0 0 1 .5-.5z"/>
+        </svg>Configure Tools
+      </h3>
+      <button class="settings-close-btn" id="settingsCloseBtn" title="Close">&#xd7;</button>
+    </div>
+    <div class="settings-modal-body">
+      <p class="settings-section-title">API Keys &amp; Models</p>
+      <div class="settings-msg" id="settingsMsg"></div>
+      <div id="modelKeyList">
+        <div style="padding:20px;text-align:center;opacity:0.45;font-size:12px;">Loading…</div>
+      </div>
+    </div>
   </div>
 
 <script nonce="${nonce}">
@@ -2841,6 +2837,78 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let availableModels = [];
   let currentMode = 'agent';
 
+  // ── Session management ──
+  let sessions = [];
+  let activeSessionId = null;
+  let _sessionIdCounter = 0;
+  const SESSIONS_VISIBLE = 3;
+  const sessionsListEl = document.getElementById('sessionsList');
+  const sessionsFooterEl = document.getElementById('sessionsFooter');
+  const sessionsMoreBtn = document.getElementById('sessionsMoreBtn');
+
+  function _fmtTimeAgo(ts) {
+    const diff = Date.now() - ts;
+    const s = Math.floor(diff / 1000);
+    if (s < 60) return 'just now';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + ' min ago';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + ' hr ago';
+    const d = Math.floor(h / 24);
+    if (d < 7) return d + (d === 1 ? ' day ago' : ' days ago');
+    const w = Math.floor(d / 7);
+    return w + (w === 1 ? ' wk ago' : ' wks ago');
+  }
+
+  function renderSessions() {
+    if (!sessionsListEl) return;
+    const visible = sessions.slice(0, SESSIONS_VISIBLE);
+    const hidden = sessions.length - visible.length;
+    sessionsListEl.innerHTML = '';
+    for (const s of visible) {
+      const item = document.createElement('div');
+      item.className = 'session-item' + (s.id === activeSessionId ? ' active' : '');
+      item.dataset.sid = s.id;
+      const title = s.title.length > 50 ? s.title.slice(0, 50) + '\u2026' : s.title;
+      item.innerHTML =
+        '<div class="session-item-top">' +
+          '<div class="session-bullet"></div>' +
+          '<span class="session-title" title="' + s.title + '">' + title + '</span>' +
+          '<span class="session-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H9v1h1v1H6v-1h1v-1H2a1 1 0 0 1-1-1V3zm13 7V3H2v7h12z"/></svg></span>' +
+        '</div>' +
+        '<div class="session-item-bottom">' +
+          '<span class="session-status">' + (s.status || 'In progress') + '</span>' +
+          '<span class="session-time">' + _fmtTimeAgo(s.ts) + '</span>' +
+        '</div>';
+      sessionsListEl.appendChild(item);
+    }
+    if (hidden > 0 && sessionsFooterEl && sessionsMoreBtn) {
+      sessionsFooterEl.style.display = '';
+      sessionsMoreBtn.textContent = 'MORE (' + hidden + ')';
+    } else if (sessionsFooterEl) {
+      sessionsFooterEl.style.display = 'none';
+    }
+  }
+
+  function createSession(title) {
+    const s = { id: ++_sessionIdCounter, title: title || 'New chat', status: 'In progress', ts: Date.now() };
+    sessions.unshift(s);
+    activeSessionId = s.id;
+    renderSessions();
+    return s;
+  }
+
+  function completeActiveSession(elapsed) {
+    const s = sessions.find(x => x.id === activeSessionId);
+    if (s && s.status === 'In progress') {
+      s.status = elapsed ? 'Completed in ' + elapsed + '.' : 'Completed';
+      renderSessions();
+    }
+  }
+
+  // Track session elapsed time
+  let _sessionStartTs = 0;
+
   // ── Image attachment state ──
   let pendingImage = null; // { base64, mimeType, fileName }
 
@@ -2906,12 +2974,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     for (const f of trackedFiles) {
       const chip = document.createElement('span');
       chip.className = 'file-chip';
+      const lang = (f.languageId || '').toUpperCase().slice(0, 4);
       chip.innerHTML =
-        '<span class="icon">\ud83d\udcc4</span>' +
-        '<span class="name" title="' + f.relPath + '">' + f.fileName + '</span>' +
-        (f.languageId ? '<span class="lang-badge">' + f.languageId + '</span>' : '') +
-        '<span class="remove" title="Remove">\u00d7</span>';
-      chip.querySelector('.remove').onclick = () => {
+        '<span class="chip-plus">+</span>' +
+        (lang ? '<span class="lang-badge">' + lang + '</span>' : '') +
+        '<span class="chip-name" title="' + f.relPath + '">' + f.fileName + '</span>' +
+        '<span class="chip-remove" title="Remove">\u00d7</span>';
+      chip.querySelector('.chip-remove').onclick = () => {
         trackedFiles = trackedFiles.filter(t => t.relPath !== f.relPath);
         renderChips();
         vscode.postMessage({ type: 'removeTrackedFile', relPath: f.relPath });
@@ -2926,6 +2995,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // If an image is attached, send as image message
     if (pendingImage) {
       const msg = input.value.trim() || 'Recreate this UI exactly as shown in the image';
+      if (!activeSessionId || chat.children.length === 0) {
+        createSession(msg);
+        _sessionStartTs = Date.now();
+      }
       vscode.postMessage({
         type: 'sendImageMessage',
         message: msg,
@@ -2943,12 +3016,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (!input.value.trim()) return;
-    const files = trackedFiles.map(f => f.relPath);
-    vscode.postMessage({ type: 'sendMessage', message: input.value, attachedFiles: files });
+    const msgText = input.value.trim();
+    // Start a new session on first message in empty chat
+    if (!activeSessionId || chat.children.length === 0) {
+      createSession(msgText);
+      _sessionStartTs = Date.now();
+    }
+    const files = trackedFiles.filter(f => !f.localContent).map(f => f.relPath);
+    const localFiles = trackedFiles.filter(f => f.localContent).map(f => ({ name: f.fileName, content: f.localContent }));
+    vscode.postMessage({ type: 'sendMessage', message: msgText, attachedFiles: files, localFiles });
+    // Clear local-uploaded chips after send
+    trackedFiles = trackedFiles.filter(f => f.source !== 'manual' || !f.localContent);
+    renderChips();
     input.value = '';
   };
 
   if (newChat) newChat.onclick = () => {
+    completeActiveSession();
+    activeSessionId = null;
     vscode.postMessage({ type: 'newChat' });
   };
 
@@ -2964,11 +3049,93 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ type: 'pickFile' });
   };
 
-  // Model selector
+  // Model selector (hidden native select, kept for compat)
   if (modelSelect) modelSelect.onchange = () => {
     const selectedId = modelSelect.value;
     vscode.postMessage({ type: 'selectModel', modelId: selectedId });
   };
+
+  // ── Floating picker helpers ──
+  const modePicker  = document.getElementById('modePicker');
+  const modelPicker = document.getElementById('modelPicker');
+
+  function openPicker(picker, anchorBtn) {
+    if (!picker) return;
+    // Close any open pickers first
+    document.querySelectorAll('.floating-picker.open').forEach(p => p.classList.remove('open'));
+    // Position below / near anchor
+    const wrapper = document.querySelector('.chat-input-wrapper');
+    const wRect = wrapper ? wrapper.getBoundingClientRect() : { bottom: 0, left: 0 };
+    const bRect = anchorBtn.getBoundingClientRect();
+    picker.style.bottom = (window.innerHeight - bRect.top + 4) + 'px';
+    picker.style.left = Math.max(0, bRect.left - (wrapper ? wrapper.getBoundingClientRect().left : 0)) + 'px';
+    picker.classList.add('open');
+    // Close on outside click
+    const close = (e) => {
+      if (!picker.contains(e.target) && e.target !== anchorBtn) {
+        picker.classList.remove('open');
+        document.removeEventListener('mousedown', close, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('mousedown', close, true), 50);
+  }
+
+  // Mode menu button → floating picker
+  const modeMenuBtn = document.getElementById('modeMenuBtn');
+  if (modeMenuBtn && modePicker) {
+    modeMenuBtn.onclick = () => openPicker(modePicker, modeMenuBtn);
+    modePicker.querySelectorAll('.picker-item').forEach(btn => {
+      btn.onclick = () => {
+        const mode = btn.dataset.mode;
+        if (!mode || mode === currentMode) { modePicker.classList.remove('open'); return; }
+        currentMode = mode;
+        if (modeSelect) modeSelect.value = mode;
+        vscode.postMessage({ type: 'setMode', mode });
+        const placeholders = { ask: 'Ask a question about your code', agent: 'Describe what to build next', plan: 'Describe what you want to build' };
+        if (input) input.placeholder = placeholders[mode] || placeholders.agent;
+        // Update checkmarks
+        // Sync label and checkmarks
+        const modeLabelEl = document.getElementById('modeLabel');
+        if (modeLabelEl) modeLabelEl.textContent = btn.textContent.replace('\u2713', '').trim();
+        modePicker.querySelectorAll('.picker-item').forEach(b => {
+          b.classList.toggle('selected', b.dataset.mode === mode);
+          b.querySelector('.picker-check').textContent = b.dataset.mode === mode ? '\u2713' : '';
+        });
+        modePicker.classList.remove('open');
+      };
+    });
+  }
+
+  // Model menu button → floating picker
+  const modelMenuBtn = document.getElementById('modelMenuBtn');
+  if (modelMenuBtn && modelPicker) {
+    modelMenuBtn.onclick = () => openPicker(modelPicker, modelMenuBtn);
+  }
+
+  // Upload local file button → opens system file picker
+  const uploadLocalFileBtn = document.getElementById('uploadLocalFileBtn');
+  const localFileInput = document.getElementById('localFileInput');
+  if (uploadLocalFileBtn && localFileInput) {
+    uploadLocalFileBtn.onclick = () => localFileInput.click();
+    localFileInput.addEventListener('change', (e) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      for (const file of files) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const content = reader.result;
+          // Add as a tracked chip and send content as context
+          const alreadyTracked = trackedFiles.find(t => t.fileName === file.name);
+          if (!alreadyTracked) {
+            trackedFiles.push({ relPath: file.name, fileName: file.name, languageId: '', source: 'manual', localContent: content });
+            renderChips();
+          }
+        };
+        reader.readAsText(file);
+      }
+      localFileInput.value = '';
+    });
+  }
 
   // Auto-grow textarea (Copilot-like)
   if (input) {
@@ -3002,7 +3169,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (msg.type === 'userMessage') add('You', msg.message, 'user');
-    if (msg.type === 'assistantMessage') add('AI', msg.message, 'assistant');
+    if (msg.type === 'assistantMessage') {
+      add('AI', msg.message, 'assistant');
+      // Mark session complete with elapsed time
+      if (_sessionStartTs > 0) {
+        const elapsed = Math.round((Date.now() - _sessionStartTs) / 1000);
+        completeActiveSession(elapsed + 's');
+        _sessionStartTs = 0;
+      } else {
+        completeActiveSession();
+      }
+    }
     if (msg.type === 'linkCheckpoint') {
       const userMsgs = chat.querySelectorAll('.msg.user');
       const last = userMsgs[userMsgs.length - 1];
@@ -3024,6 +3201,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (msg.type === 'modeChanged') {
       currentMode = msg.mode;
       if (modeSelect) modeSelect.value = msg.mode;
+      // Sync mode label button text
+      const modeLabelEl = document.getElementById('modeLabel');
+      if (modeLabelEl) {
+        const labels = { ask: 'Ask', agent: 'Agent', plan: 'Plan' };
+        modeLabelEl.textContent = labels[msg.mode] || msg.mode;
+      }
+      // Sync mode picker checkmarks
+      if (modePicker) {
+        modePicker.querySelectorAll('.picker-item').forEach(b => {
+          b.classList.toggle('selected', b.dataset.mode === msg.mode);
+          b.querySelector('.picker-check').textContent = b.dataset.mode === msg.mode ? '\u2713' : '';
+        });
+      }
     }
     if (msg.type === 'planMessage') {
       addPlan(msg.message, msg.originalRequest);
@@ -3065,16 +3255,63 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           modelSelect.appendChild(opt);
         }
       }
+      // Update model label button
+      const modelLabelEl = document.getElementById('modelLabel');
+      if (modelLabelEl) {
+        const active = availableModels.find(m => m.id === msg.activeModel);
+        if (active) modelLabelEl.textContent = active.label;
+      }
+      // Populate model picker
+      if (modelPicker) {
+        modelPicker.innerHTML = '';
+        for (const m of availableModels) {
+          const btn = document.createElement('button');
+          btn.className = 'picker-item' + (m.id === msg.activeModel ? ' selected' : '');
+          btn.innerHTML =
+            '<span class="picker-check">' + (m.id === msg.activeModel ? '\u2713' : '') + '</span>' +
+            m.label;
+          btn.onclick = () => {
+            modelPicker.classList.remove('open');
+            vscode.postMessage({ type: 'selectModel', modelId: m.id });
+          };
+          modelPicker.appendChild(btn);
+        }
+      }
     }
     if (msg.type === 'modelChangeResult') {
       if (msg.success) {
         if (modelSelect) modelSelect.value = msg.activeModel;
+        const modelLabelEl = document.getElementById('modelLabel');
+        if (modelLabelEl) {
+          const active = availableModels.find(m => m.id === msg.activeModel);
+          if (active) modelLabelEl.textContent = active.label;
+        }
+        // Update picker checkmarks
+        if (modelPicker) {
+          modelPicker.querySelectorAll('.picker-item').forEach((btn, i) => {
+            const m = availableModels[i];
+            if (m) {
+              btn.classList.toggle('selected', m.id === msg.activeModel);
+              btn.querySelector('.picker-check').textContent = m.id === msg.activeModel ? '\u2713' : '';
+            }
+          });
+        }
       } else {
         const cur = availableModels.find(m => m.id === msg.activeModel);
         if (cur && modelSelect) { modelSelect.value = cur.id; }
         if (msg.error) {
           add('Error', msg.error, 'assistant');
         }
+      }
+    }
+    if (msg.type === 'apiKeysState') {
+      renderModelKeyList(msg.keys, msg.activeModel);
+    }
+    if (msg.type === 'apiKeyResult') {
+      showSettingsMsg(msg.success ? '✓ ' + msg.message : '✕ ' + msg.message, msg.success ? 'ok' : 'err');
+      if (msg.success) {
+        // Refresh the list to show updated key status
+        vscode.postMessage({ type: 'requestApiKeys' });
       }
     }
   }
@@ -3090,6 +3327,125 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   console.log('✅ Webview ready, notifying extension');
   vscode.postMessage({ type: 'webviewReady' });
 
+  // ── Settings modal ──────────────────────────────────────────
+  const settingsModal    = document.getElementById('settingsModal');
+  const settingsBackdrop = document.getElementById('settingsBackdrop');
+  const settingsCloseBtn = document.getElementById('settingsCloseBtn');
+  const settingsMsg      = document.getElementById('settingsMsg');
+  const modelKeyList     = document.getElementById('modelKeyList');
+  const toolsBtn         = document.getElementById('toolsBtn');
+
+  function openSettings() {
+    if (settingsModal)    settingsModal.classList.add('open');
+    if (settingsBackdrop) settingsBackdrop.classList.add('open');
+    // Ask extension for current key state
+    vscode.postMessage({ type: 'requestApiKeys' });
+    if (settingsMsg) { settingsMsg.textContent = ''; settingsMsg.className = 'settings-msg'; }
+  }
+  function closeSettings() {
+    if (settingsModal)    settingsModal.classList.remove('open');
+    if (settingsBackdrop) settingsBackdrop.classList.remove('open');
+  }
+
+  if (toolsBtn)         toolsBtn.onclick         = openSettings;
+  if (settingsCloseBtn) settingsCloseBtn.onclick  = closeSettings;
+  if (settingsBackdrop) settingsBackdrop.onclick  = closeSettings;
+
+  // Render per-model key rows when extension replies with apiKeysState
+  function renderModelKeyList(keysState, activeModelId) {
+    if (!modelKeyList) return;
+    modelKeyList.innerHTML = '';
+
+    const providerMeta = [
+      { id: 'groq',      label: 'Groq',           placeholder: 'gsk_… Enter Groq API key' },
+      { id: 'openai',    label: 'OpenAI',          placeholder: 'sk-… Enter OpenAI API key' },
+      { id: 'anthropic', label: 'Anthropic',       placeholder: 'sk-ant-… Enter Anthropic API key' },
+      { id: 'gemini',    label: 'Google Gemini',   placeholder: 'AIza… Enter Gemini API key' },
+    ];
+
+    for (const prov of providerMeta) {
+      const provModels = availableModels.filter(m => m.provider === prov.id);
+      if (!provModels.length) continue;
+
+      const sectionHeader = document.createElement('div');
+      sectionHeader.className = 'provider-section-header';
+      sectionHeader.textContent = prov.label + ' Models';
+      modelKeyList.appendChild(sectionHeader);
+
+      for (const m of provModels) {
+        const maskedKey = (keysState && keysState[m.id]) || '';
+        const hasKey = !!maskedKey;
+        const isActive = m.id === activeModelId;
+        const row = document.createElement('div');
+        row.className = 'model-key-row';
+        row.innerHTML =
+          '<div class="model-key-top">' +
+            '<span class="model-key-name">' + m.label +
+              (isActive ? '<span class="settings-active-badge">active</span>' : '') +
+            '</span>' +
+            '<span class="model-key-ctx">' + m.ctx + '</span>' +
+            '<span class="model-key-status ' + (hasKey ? 'set' : 'unset') + '">' +
+              (hasKey ? '● Key set' : '○ No key') +
+            '</span>' +
+          '</div>' +
+          '<div class="model-key-input-row">' +
+            '<input class="model-key-input" type="password" placeholder="' + prov.placeholder + '" ' +
+              'data-model="' + m.id + '" data-original="' + maskedKey + '" autocomplete="off" />' +
+            '<button class="model-key-eye-btn" title="Show/hide key" tabindex="-1">' +
+              '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3C4.5 3 1.5 5.5 0 8c1.5 2.5 4.5 5 8 5s6.5-2.5 8-5c-1.5-2.5-4.5-5-8-5zm0 8.5A3.5 3.5 0 1 1 8 4.5a3.5 3.5 0 0 1 0 7zm0-5.5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>' +
+            '</button>' +
+            '<button class="model-key-save-btn" data-model="' + m.id + '">Save</button>' +
+            '<button class="model-key-del-btn' + (hasKey ? ' visible' : '') + '" data-model="' + m.id + '" title="Remove key">✕</button>' +
+          '</div>' +
+          (!isActive ? '<div style="margin-top:2px"><button class="model-key-set-active-btn" data-model="' + m.id + '">Set as active model</button></div>' : '') +
+          '';
+        const inp     = row.querySelector('.model-key-input');
+        const eyeBtn  = row.querySelector('.model-key-eye-btn');
+        const save    = row.querySelector('.model-key-save-btn');
+        const del     = row.querySelector('.model-key-del-btn');
+        const setActive = row.querySelector('.model-key-set-active-btn');
+
+        if (maskedKey) { inp.value = maskedKey; }
+
+        const eyeOpen  = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3C4.5 3 1.5 5.5 0 8c1.5 2.5 4.5 5 8 5s6.5-2.5 8-5c-1.5-2.5-4.5-5-8-5zm0 8.5A3.5 3.5 0 1 1 8 4.5a3.5 3.5 0 0 1 0 7zm0-5.5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>';
+        const eyeClosed = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.36 2.64 12.3 1.58C10.94 2.47 9.51 3 8 3 4.5 3 1.5 5.5 0 8c.72 1.2 1.72 2.24 2.9 3.02L1.58 12.3l1.06 1.06 10.72-10.72zm-9.1 9.1A5.94 5.94 0 0 1 2 8c1.3-2.17 3.8-4 6-4 .9 0 1.8.25 2.64.67L11.3 5.33A3.5 3.5 0 0 0 6.16 10.2l-1.9 1.54zM8 13c-1.49 0-2.94-.53-4.3-1.42l1.07-1.07A3.5 3.5 0 0 0 9.84 5.8l1.07-1.07C12.5 5.75 14 6.9 14 8c-1.5 2.5-3.5 5-6 5z"/></svg>';
+        if (eyeBtn) eyeBtn.onclick = (e) => {
+          e.preventDefault();
+          const isPassword = inp.type === 'password';
+          inp.type = isPassword ? 'text' : 'password';
+          eyeBtn.innerHTML = isPassword ? eyeClosed : eyeOpen;
+          eyeBtn.title = isPassword ? 'Hide key' : 'Show key';
+        };
+
+        save.onclick = () => {
+          const val = inp.value.trim();
+          if (!val) { showSettingsMsg('Enter a key first.', 'err'); return; }
+          if (val === inp.dataset.original) { showSettingsMsg('Key is already saved.', 'ok'); return; }
+          showSettingsMsg('Saving…', '');
+          vscode.postMessage({ type: 'setApiKey', modelId: m.id, apiKey: val });
+        };
+        if (del) del.onclick = () => {
+          showSettingsMsg('Removing key…', '');
+          vscode.postMessage({ type: 'deleteApiKey', modelId: m.id });
+        };
+        if (setActive) setActive.onclick = () => {
+          vscode.postMessage({ type: 'selectModel', modelId: m.id });
+          closeSettings();
+        };
+        inp.addEventListener('keydown', e => { if (e.key === 'Enter') save.click(); });
+        modelKeyList.appendChild(row);
+      }
+    }
+  }
+
+  function showSettingsMsg(text, type) {
+    if (!settingsMsg) return;
+    settingsMsg.textContent = text;
+    settingsMsg.className = 'settings-msg' + (type ? ' ' + type : '');
+  }
+
+  renderSessions();
+
   function add(title, text, cls) {
     const div = document.createElement('div');
     div.className = 'msg ' + cls;
@@ -3100,7 +3456,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const label = document.createElement('span');
     label.className = 'msg-label';
-    label.textContent = title;
+    
+    if (cls === 'assistant') {
+      label.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-right:6px;vertical-align:middle;"><path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z"/></svg>' + title;
+    } else {
+      label.textContent = title;
+    }
     header.appendChild(label);
 
     const actions = document.createElement('span');
@@ -3110,7 +3471,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // 1. Edit button — loads text back into input
       const editBtn = document.createElement('button');
       editBtn.title = 'Edit & Resend';
-      editBtn.innerHTML = '<svg viewBox="0 0 16 16"><path d="M13.23 1h-1.46L3.52 9.25l-.16.22L1 13.59 2.41 15l4.12-2.36.22-.16L15 4.23V2.77L13.23 1zM2.41 13.59l1.51-3 1.45 1.45-2.96 1.55zm3.83-2.06L4.47 9.76l8-8 1.77 1.77-8 8z"/></svg><span class="check-icon">✓</span>';
+      editBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.23 1h-1.46L3.52 9.25l-.16.22L1 13.59 2.41 15l4.12-2.36.22-.16L15 4.23V2.77L13.23 1zM2.41 13.59l1.51-3 1.45 1.45-2.96 1.55zm3.83-2.06L4.47 9.76l8-8 1.77 1.77-8 8z"/></svg>';
       editBtn.onclick = () => {
         input.value = text;
         input.focus();
@@ -3127,11 +3488,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // 2. Copy button
       const copyBtn = document.createElement('button');
       copyBtn.title = 'Copy';
-      copyBtn.innerHTML = '<svg viewBox="0 0 16 16"><path d="M4 4l1-1h5.414L14 6.586V14l-1 1H5l-1-1V4zm9 3l-3-3H5v10h8V7zM3 1L2 2v10l1 1V2h6.414l-1-1H3z"/></svg><span class="check-icon">✓</span>';
+      copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 4l1-1h5.414L14 6.586V14l-1 1H5l-1-1V4zm9 3l-3-3H5v10h8V7zM3 1L2 2v10l1 1V2h6.414l-1-1H3z"/></svg>';
       copyBtn.onclick = () => {
         vscode.postMessage({ type: 'copyCode', code: text });
-        copyBtn.classList.add('done');
-        setTimeout(() => { copyBtn.classList.remove('done'); }, 1200);
+        copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg>';
+        setTimeout(() => { copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 4l1-1h5.414L14 6.586V14l-1 1H5l-1-1V4zm9 3l-3-3H5v10h8V7zM3 1L2 2v10l1 1V2h6.414l-1-1H3z"/></svg>'; }, 1200);
       };
       actions.appendChild(copyBtn);
 
@@ -3139,16 +3500,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       //    (hidden until a checkpoint is linked via 'linkCheckpoint' message)
       const restoreBtn = document.createElement('button');
       restoreBtn.title = 'Restore code to before this change';
-      restoreBtn.innerHTML = '<svg viewBox="0 0 16 16"><path d="M4.5 2A3.5 3.5 0 0 0 1 5.5v1h1v-1A2.5 2.5 0 0 1 4.5 3h4.3L7.1 4.7l.8.6 2.5-2.5v-.6L7.9 0l-.8.6L8.8 2H4.5zM15 5.5a3.5 3.5 0 0 0-3.5-3.5v1A2.5 2.5 0 0 1 14 5.5v5a2.5 2.5 0 0 1-2.5 2.5h-8A2.5 2.5 0 0 1 1 10.5v-1H0v1A3.5 3.5 0 0 0 3.5 14h8a3.5 3.5 0 0 0 3.5-3.5v-5z"/></svg><span class="check-icon">✓</span>';
+      restoreBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 2A3.5 3.5 0 0 0 1 5.5v1h1v-1A2.5 2.5 0 0 1 4.5 3h4.3L7.1 4.7l.8.6 2.5-2.5v-.6L7.9 0l-.8.6L8.8 2H4.5zM15 5.5a3.5 3.5 0 0 0-3.5-3.5v1A2.5 2.5 0 0 1 14 5.5v5a2.5 2.5 0 0 1-2.5 2.5h-8A2.5 2.5 0 0 1 1 10.5v-1H0v1A3.5 3.5 0 0 0 3.5 14h8a3.5 3.5 0 0 0 3.5-3.5v-5z"/></svg>';
       restoreBtn.className = 'restore-btn';
       restoreBtn.style.display = 'none';
       restoreBtn.onclick = () => {
         const cpId = div.dataset.checkpointId;
         if (cpId) {
           vscode.postMessage({ type: 'checkpointAction', action: 'discard', id: cpId });
-          restoreBtn.classList.add('done');
-          restoreBtn.title = 'Restored';
-          setTimeout(() => { restoreBtn.classList.remove('done'); restoreBtn.title = 'Restore code to before this change'; }, 2000);
+          restoreBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg>';
+          setTimeout(() => { restoreBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 2A3.5 3.5 0 0 0 1 5.5v1h1v-1A2.5 2.5 0 0 1 4.5 3h4.3L7.1 4.7l.8.6 2.5-2.5v-.6L7.9 0l-.8.6L8.8 2H4.5zM15 5.5a3.5 3.5 0 0 0-3.5-3.5v1A2.5 2.5 0 0 1 14 5.5v5a2.5 2.5 0 0 1-2.5 2.5h-8A2.5 2.5 0 0 1 1 10.5v-1H0v1A3.5 3.5 0 0 0 3.5 14h8a3.5 3.5 0 0 0 3.5-3.5v-5z"/></svg>'; }, 2000);
         }
       };
       actions.appendChild(restoreBtn);
@@ -3156,11 +3516,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // Assistant messages: copy button only
       const copyBtn = document.createElement('button');
       copyBtn.title = 'Copy';
-      copyBtn.innerHTML = '<svg viewBox="0 0 16 16"><path d="M4 4l1-1h5.414L14 6.586V14l-1 1H5l-1-1V4zm9 3l-3-3H5v10h8V7zM3 1L2 2v10l1 1V2h6.414l-1-1H3z"/></svg><span class="check-icon">✓</span>';
+      copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 4l1-1h5.414L14 6.586V14l-1 1H5l-1-1V4zm9 3l-3-3H5v10h8V7zM3 1L2 2v10l1 1V2h6.414l-1-1H3z"/></svg>';
       copyBtn.onclick = () => {
         vscode.postMessage({ type: 'copyCode', code: text });
-        copyBtn.classList.add('done');
-        setTimeout(() => { copyBtn.classList.remove('done'); }, 1200);
+        copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg>';
+        setTimeout(() => { copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 4l1-1h5.414L14 6.586V14l-1 1H5l-1-1V4zm9 3l-3-3H5v10h8V7zM3 1L2 2v10l1 1V2h6.414l-1-1H3z"/></svg>'; }, 1200);
       };
       actions.appendChild(copyBtn);
     }
@@ -3209,7 +3569,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     header.className = 'msg-header';
     const label = document.createElement('span');
     label.className = 'msg-label';
-    label.textContent = '📋 Plan';
+    label.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-right:6px;vertical-align:middle;"><path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z"/></svg>' + '📋 Plan';
     header.appendChild(label);
 
     const bubble = document.createElement('div');
@@ -3221,7 +3581,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const execBtn = document.createElement('button');
     execBtn.className = 'plan-execute-btn';
-    execBtn.textContent = '▶ Execute Plan';
+    execBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="margin-right:6px;vertical-align:middle;"><path d="M14 8L3 14V2l11 6z"/></svg>Execute Plan';
     execBtn.onclick = () => {
       execBtn.disabled = true;
       execBtn.textContent = '⏳ Executing…';
@@ -3230,11 +3590,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const copyBtn = document.createElement('button');
     copyBtn.className = 'plan-copy-btn';
-    copyBtn.textContent = '📋 Copy Plan';
+    copyBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="margin-right:6px;vertical-align:middle;"><path d="M4 4l1-1h5.414L14 6.586V14l-1 1H5l-1-1V4zm9 3l-3-3H5v10h8V7zM3 1L2 2v10l1 1V2h6.414l-1-1H3z"/></svg>Copy Plan';
     copyBtn.onclick = () => {
       vscode.postMessage({ type: 'copyCode', code: text });
-      copyBtn.textContent = '✓ Copied';
-      setTimeout(() => { copyBtn.textContent = '📋 Copy Plan'; }, 1500);
+      copyBtn.innerHTML = '✓ Copied';
+      setTimeout(() => { copyBtn.innerHTML = '📋 Copy Plan'; }, 1500);
     };
 
     actions.appendChild(execBtn);

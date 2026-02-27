@@ -51,9 +51,10 @@ export class GroqClient {
   static readonly VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
 
   private static readonly MODEL_WINDOWS: Record<string, number> = {
+    // Groq
     'llama-3.3-70b-versatile':   128_000,
     'llama-3.1-70b-versatile':   128_000,
-    'llama-3.1-8b-instant':      8_000,      // free-tier TPM ≈ 6 000
+    'llama-3.1-8b-instant':      8_000,
     'llama-3.2-1b-preview':      8_000,
     'llama-3.2-3b-preview':      8_000,
     'mixtral-8x7b-32768':        32_768,
@@ -61,21 +62,63 @@ export class GroqClient {
     'meta-llama/llama-4-scout-17b-16e-instruct': 128_000,
     'openai/gpt-oss-120b':       131_072,
     'openai/gpt-oss-20b':        131_072,
+    // OpenAI
+    'gpt-4o':                    128_000,
+    'gpt-4o-mini':               128_000,
+    'o1-mini':                   128_000,
+    'o3-mini':                   200_000,
+    // Anthropic
+    'claude-3-5-sonnet-20241022': 200_000,
+    'claude-3-5-haiku-20241022':  200_000,
+    'claude-3-opus-20240229':     200_000,
+    // Gemini
+    'gemini-2.0-flash':    1_000_000,
+    'gemini-1.5-pro':      2_000_000,
+    'gemini-1.5-flash':    1_000_000,
   };
 
   /** Human-friendly model metadata for the selector UI. */
-  static readonly AVAILABLE_MODELS: { id: string; label: string; ctx: string }[] = [
-    { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B',   ctx: '128K' },
-    { id: 'llama-3.1-70b-versatile', label: 'Llama 3.1 70B',   ctx: '128K' },
-    { id: 'llama-3.1-8b-instant',    label: 'Llama 3.1 8B',    ctx: '8K'   },
-    { id: 'llama-3.2-1b-preview',    label: 'Llama 3.2 1B',    ctx: '8K'   },
-    { id: 'llama-3.2-3b-preview',    label: 'Llama 3.2 3B',    ctx: '8K'   },
-    { id: 'mixtral-8x7b-32768',      label: 'Mixtral 8x7B',    ctx: '32K'  },
-    { id: 'gemma2-9b-it',            label: 'Gemma 2 9B',      ctx: '8K'   },
-    { id: 'openai/gpt-oss-120b',      label: 'OpenAI GPT-OSS 120B', ctx: '128K' },
-    { id: 'openai/gpt-oss-20b',       label: 'OpenAI GPT-OSS 20B',  ctx: '128K' },
-    { id: 'meta-llama/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout (Vision)', ctx: '128K' },
+  static readonly AVAILABLE_MODELS: { id: string; label: string; ctx: string; provider: string }[] = [
+    // ── Groq ──
+    { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B',   ctx: '128K', provider: 'groq' },
+    { id: 'llama-3.1-70b-versatile', label: 'Llama 3.1 70B',   ctx: '128K', provider: 'groq' },
+    { id: 'llama-3.1-8b-instant',    label: 'Llama 3.1 8B',    ctx: '8K',   provider: 'groq' },
+    { id: 'llama-3.2-1b-preview',    label: 'Llama 3.2 1B',    ctx: '8K',   provider: 'groq' },
+    { id: 'llama-3.2-3b-preview',    label: 'Llama 3.2 3B',    ctx: '8K',   provider: 'groq' },
+    { id: 'mixtral-8x7b-32768',      label: 'Mixtral 8x7B',    ctx: '32K',  provider: 'groq' },
+    { id: 'gemma2-9b-it',            label: 'Gemma 2 9B',      ctx: '8K',   provider: 'groq' },
+    { id: 'openai/gpt-oss-120b',     label: 'GPT-OSS 120B',    ctx: '128K', provider: 'groq' },
+    { id: 'openai/gpt-oss-20b',      label: 'GPT-OSS 20B',     ctx: '128K', provider: 'groq' },
+    { id: 'meta-llama/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout (Vision)', ctx: '128K', provider: 'groq' },
+    // ── OpenAI ──
+    { id: 'gpt-4o',      label: 'GPT-4o',       ctx: '128K', provider: 'openai' },
+    { id: 'gpt-4o-mini', label: 'GPT-4o Mini',  ctx: '128K', provider: 'openai' },
+    { id: 'o1-mini',     label: 'o1 Mini',       ctx: '128K', provider: 'openai' },
+    { id: 'o3-mini',     label: 'o3 Mini',       ctx: '200K', provider: 'openai' },
+    // ── Anthropic ──
+    { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', ctx: '200K', provider: 'anthropic' },
+    { id: 'claude-3-5-haiku-20241022',  label: 'Claude 3.5 Haiku',  ctx: '200K', provider: 'anthropic' },
+    { id: 'claude-3-opus-20240229',     label: 'Claude 3 Opus',     ctx: '200K', provider: 'anthropic' },
+    // ── Google Gemini ──
+    { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', ctx: '1M',  provider: 'gemini' },
+    { id: 'gemini-1.5-pro',   label: 'Gemini 1.5 Pro',   ctx: '2M',  provider: 'gemini' },
+    { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash',  ctx: '1M',  provider: 'gemini' },
   ];
+
+  /** Return the provider for a given model ID. */
+  static getProviderForModel(modelId: string): string {
+    return GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.provider ?? 'groq';
+  }
+
+  /** Return provider display name, API key signup URL, and key placeholder. */
+  static getProviderMeta(provider: string): { name: string; apiKeyUrl: string; placeholder: string } {
+    switch (provider) {
+      case 'openai':    return { name: 'OpenAI',        apiKeyUrl: 'https://platform.openai.com/api-keys',               placeholder: 'sk-…' };
+      case 'anthropic': return { name: 'Anthropic',     apiKeyUrl: 'https://console.anthropic.com/settings/keys',        placeholder: 'sk-ant-…' };
+      case 'gemini':    return { name: 'Google Gemini', apiKeyUrl: 'https://aistudio.google.com/app/apikey',             placeholder: 'AIza…' };
+      default:          return { name: 'Groq',          apiKeyUrl: 'https://console.groq.com',                           placeholder: 'gsk_…' };
+    }
+  }
 
   /** Session-level model override (set by the UI model selector). */
   private _modelOverride: string | null = null;
@@ -134,15 +177,23 @@ export class GroqClient {
   private getConfig() {
     const config = vscode.workspace.getConfiguration('prompt2code');
     const model = this._modelOverride ?? config.get<string>('model', 'llama-3.3-70b-versatile');
+    const provider = GroqClient.getProviderForModel(model);
 
     // Resolve API key: per-model key > global fallback key
     const perModelKeys = config.get<Record<string, string>>('apiKeys', {});
     const globalKey = config.get<string>('apiKey', '');
     const apiKey = perModelKeys[model] || globalKey;
 
+    // Provider-specific completion URL (OpenAI uses the same SSE/REST format as Groq)
+    const baseUrl = provider === 'openai'
+      ? 'https://api.openai.com/v1/chat/completions'
+      : this.baseUrl;
+
     return {
       apiKey,
       model,
+      provider,
+      baseUrl,
       maxTokens: config.get<number>('maxTokens', 4096),
       temperature: config.get<number>('temperature', 0.2)
     };
@@ -151,6 +202,7 @@ export class GroqClient {
   /**
    * Resolve the API key for a specific model.
    * Checks per-model keys first, then falls back to global key.
+   * Used at inference time so any model can pick up the global fallback key.
    */
   getApiKeyForModel(modelId: string): string {
     const config = vscode.workspace.getConfiguration('prompt2code');
@@ -159,35 +211,53 @@ export class GroqClient {
   }
 
   /**
-   * Validate an API key by making a tiny request to Groq.
-   * Returns true if the key is valid, false otherwise.
+   * Return ONLY the explicitly saved per-model key — no global fallback.
+   * Used by the settings modal so models without explicit keys show blank.
+   */
+  getExplicitApiKeyForModel(modelId: string): string {
+    const config = vscode.workspace.getConfiguration('prompt2code');
+    const perModelKeys = config.get<Record<string, string>>('apiKeys', {});
+    return perModelKeys[modelId] ?? '';
+  }
+
+  /**
+   * Validate an API key by routing to the correct provider endpoint.
    */
   async validateApiKey(apiKey: string, modelId?: string): Promise<{ valid: boolean; error?: string }> {
+    const provider = GroqClient.getProviderForModel(modelId ?? 'llama-3.1-8b-instant');
     try {
-      const response = await axios.post<GroqResponse>(
-        this.baseUrl,
-        {
-          model: modelId || 'llama-3.1-8b-instant',
-          messages: [{ role: 'user', content: 'hi' }],
-          max_tokens: 1,
-          temperature: 0,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 15000,
-        }
-      );
-      return { valid: !!response.data?.choices?.length };
+      if (provider === 'openai') {
+        await axios.post(
+          'https://api.openai.com/v1/chat/completions',
+          { model: modelId || 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 },
+          { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+        );
+      } else if (provider === 'anthropic') {
+        await axios.post(
+          'https://api.anthropic.com/v1/messages',
+          { model: modelId || 'claude-3-5-haiku-20241022', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] },
+          { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 15000 }
+        );
+      } else if (provider === 'gemini') {
+        const geminiModel = modelId || 'gemini-1.5-flash';
+        await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`,
+          { contents: [{ role: 'user', parts: [{ text: 'hi' }] }], generationConfig: { maxOutputTokens: 1 } },
+          { headers: { 'content-type': 'application/json' }, timeout: 15000 }
+        );
+      } else {
+        // Groq
+        await axios.post<GroqResponse>(
+          this.baseUrl,
+          { model: modelId || 'llama-3.1-8b-instant', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1, temperature: 0 },
+          { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+        );
+      }
+      return { valid: true };
     } catch (error: any) {
       const status = error.response?.status;
-      if (status === 401) {
+      if (status === 401 || status === 403) {
         return { valid: false, error: 'Invalid API key — authentication failed.' };
-      }
-      if (status === 403) {
-        return { valid: false, error: 'API key does not have permission.' };
       }
       return { valid: false, error: error.message || 'Validation request failed.' };
     }
@@ -198,107 +268,152 @@ export class GroqClient {
     options?: { maxTokens?: number; temperature?: number }
   ): Promise<GroqCompletionResult> {
     const config = this.getConfig();
+    const maxTokens = options?.maxTokens ?? config.maxTokens;
+    const temperature = options?.temperature ?? config.temperature;
 
     if (!config.apiKey) {
+      const providerName: Record<string,string> = { groq: 'Groq', openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Google Gemini' };
       vscode.window.showErrorMessage(
-        'Groq API key not set. Configure prompt2code.apiKey in settings.'
+        `${providerName[config.provider] ?? config.provider} API key not set for model ${config.model}.`
       );
-      throw new Error('Missing Groq API key');
+      throw new Error(`Missing API key for ${config.provider}`);
     }
 
-    const request: GroqRequest = {
-      model: config.model,
-      messages,
-      max_tokens: options?.maxTokens ?? config.maxTokens,
-      temperature: options?.temperature ?? config.temperature,
-      stream: false
-    };
+    if (config.provider === 'openai') {
+      return this.requestOpenAI(messages, config.model, config.apiKey, { maxTokens, temperature });
+    } else if (config.provider === 'anthropic') {
+      return this.requestAnthropic(messages, config.model, config.apiKey, { maxTokens, temperature });
+    } else if (config.provider === 'gemini') {
+      return this.requestGemini(messages, config.model, config.apiKey, { maxTokens, temperature });
+    } else {
+      return this.requestGroq(messages, config.model, config.apiKey, { maxTokens, temperature });
+    }
+  }
 
+  /** Groq (and Groq-hosted OSS models) via OpenAI-compatible endpoint with retry logic. */
+  private async requestGroq(
+    messages: GroqMessage[],
+    model: string,
+    apiKey: string,
+    options: { maxTokens: number; temperature: number }
+  ): Promise<GroqCompletionResult> {
+    const request: GroqRequest = { model, messages, max_tokens: options.maxTokens, temperature: options.temperature, stream: false };
     const MAX_RETRIES = 3;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const response = await axios.post<GroqResponse>(
-          this.baseUrl,
-          request,
-          {
-            headers: {
-              Authorization: `Bearer ${config.apiKey}`,
-              'Content-Type': 'application/json'
-            },
-            timeout: 30000
-          }
+          this.baseUrl, request,
+          { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 30000 }
         );
-
         const choice = response.data?.choices?.[0];
-        const content = typeof choice?.message?.content === 'string'
-          ? choice.message.content
-          : '';
-
-        if (!content || !content.trim()) {
-          throw new Error('Groq returned an empty response');
-        }
-
-        return {
-          content,
-          finishReason: choice?.finish_reason
-        };
-
+        const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+        if (!content || !content.trim()) { throw new Error('Provider returned an empty response'); }
+        return { content, finishReason: choice?.finish_reason };
       } catch (error: any) {
         if (!axios.isAxiosError(error)) {
-          vscode.window.showErrorMessage(
-            'Unexpected error communicating with Groq.'
-          );
+          vscode.window.showErrorMessage('Unexpected error communicating with Groq.');
           throw error;
         }
-
         const status = error.response?.status;
         const code = (error as any).code as string | undefined;
-        const apiMessage =
-          (error.response as any)?.data?.error?.message || error.message;
-
+        const apiMessage = (error.response as any)?.data?.error?.message || error.message;
         const isRateLimit = status === 429;
-        const isTransientNetwork =
-          !status &&
-          (code === 'ENOTFOUND' ||
-            code === 'ECONNRESET' ||
-            code === 'ETIMEDOUT' ||
-            code === 'EAI_AGAIN');
-
-        const canRetry = attempt < MAX_RETRIES && (isRateLimit || isTransientNetwork);
-
-        if (canRetry) {
+        const isTransient = !status && ['ENOTFOUND','ECONNRESET','ETIMEDOUT','EAI_AGAIN'].includes(code ?? '');
+        if (attempt < MAX_RETRIES && (isRateLimit || isTransient)) {
           let backoffMs = 500 * Math.pow(2, attempt);
-
           if (isRateLimit) {
-            const retryAfterHeader = error.response?.headers?.['retry-after'];
-            const retryAfterSeconds = Number(retryAfterHeader);
-            if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
-              backoffMs = Math.max(backoffMs, retryAfterSeconds * 1000);
-            }
+            const s = Number(error.response?.headers?.['retry-after']);
+            if (Number.isFinite(s) && s > 0) { backoffMs = Math.max(backoffMs, s * 1000); }
           }
-
           await this.sleep(backoffMs);
           continue;
         }
-
-        // Final failure: show the most useful message.
-        if (!status) {
-          vscode.window.showErrorMessage(
-            `Groq network error${code ? ` (${code})` : ''}: ${apiMessage}. Check internet/DNS/proxy settings.`
-          );
-        } else {
-          vscode.window.showErrorMessage(
-            `Groq API error (${status}): ${apiMessage}`
-          );
-        }
-
+        vscode.window.showErrorMessage(
+          status ? `Groq API error (${status}): ${apiMessage}` : `Groq network error${code ? ` (${code})` : ''}: ${apiMessage}`
+        );
         throw error;
       }
     }
-
-    // Unreachable, but TS needs a return.
     throw new Error('Groq request failed after retries');
+  }
+
+  /** OpenAI GPT models via api.openai.com (same REST format as Groq). */
+  private async requestOpenAI(
+    messages: GroqMessage[],
+    model: string,
+    apiKey: string,
+    options: { maxTokens: number; temperature: number }
+  ): Promise<GroqCompletionResult> {
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      { model, messages, max_tokens: options.maxTokens, temperature: options.temperature },
+      { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 60000 }
+    );
+    const choice = response.data?.choices?.[0];
+    const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+    if (!content) { throw new Error('OpenAI returned an empty response'); }
+    return { content, finishReason: choice?.finish_reason };
+  }
+
+  /** Anthropic Claude models — different message/response format. */
+  private async requestAnthropic(
+    messages: GroqMessage[],
+    model: string,
+    apiKey: string,
+    options: { maxTokens: number; temperature: number }
+  ): Promise<GroqCompletionResult> {
+    // Anthropic separates system prompt from messages
+    let system: string | undefined;
+    const anthropicMessages: { role: 'user' | 'assistant'; content: string }[] = [];
+    for (const m of messages) {
+      const text = typeof m.content === 'string'
+        ? m.content
+        : (m.content as any[]).filter(p => p.type === 'text').map(p => p.text).join('\n');
+      if (m.role === 'system') { system = text; }
+      else { anthropicMessages.push({ role: m.role as 'user' | 'assistant', content: text }); }
+    }
+    const body: Record<string, any> = { model, max_tokens: options.maxTokens, messages: anthropicMessages };
+    if (system) { body.system = system; }
+    const response = await axios.post(
+      'https://api.anthropic.com/v1/messages', body,
+      { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 60000 }
+    );
+    const content = response.data?.content?.[0]?.text ?? '';
+    if (!content) { throw new Error('Anthropic returned an empty response'); }
+    return { content, finishReason: response.data?.stop_reason === 'max_tokens' ? 'length' : (response.data?.stop_reason ?? 'stop') };
+  }
+
+  /** Google Gemini models — different message/response format. */
+  private async requestGemini(
+    messages: GroqMessage[],
+    model: string,
+    apiKey: string,
+    options: { maxTokens: number; temperature: number }
+  ): Promise<GroqCompletionResult> {
+    let systemInstruction: string | undefined;
+    const contents: { role: string; parts: { text: string }[] }[] = [];
+    for (const m of messages) {
+      const text = typeof m.content === 'string'
+        ? m.content
+        : (m.content as any[]).filter(p => p.type === 'text').map(p => p.text).join('\n');
+      if (m.role === 'system') { systemInstruction = text; }
+      else { contents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text }] }); }
+    }
+    const body: Record<string, any> = {
+      contents,
+      generationConfig: { maxOutputTokens: options.maxTokens, temperature: options.temperature },
+    };
+    if (systemInstruction) { body.systemInstruction = { parts: [{ text: systemInstruction }] }; }
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      body,
+      { headers: { 'content-type': 'application/json' }, timeout: 60000 }
+    );
+    const content = response.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    if (!content) { throw new Error('Gemini returned an empty response'); }
+    const rawFinish = response.data?.candidates?.[0]?.finishReason as string | undefined;
+    return { content, finishReason: rawFinish === 'MAX_TOKENS' ? 'length' : (rawFinish ?? 'stop') };
   }
 
   // ===========================
@@ -595,14 +710,15 @@ export class GroqClient {
     const config = this.getConfig();
 
     if (!config.apiKey) {
-      vscode.window.showErrorMessage(
-        'Groq API key not set. Configure prompt2code.apiKey in settings.'
-      );
-      throw new Error('Missing Groq API key');
+      vscode.window.showErrorMessage(`API key not set for model ${config.model}.`);
+      throw new Error('Missing API key');
     }
 
     const systemPrompt = [
-      `You are an expert ${language} developer performing a SURGICAL code edit.`,
+      'You are a world-class developer proficient in every language and framework.',
+      'You are performing a PRECISE, SURGICAL code edit.',
+      '',
+      'YOUR #1 GOAL: Follow the user\'s instruction exactly and make it work.',
       '',
       'RULES (FOLLOW EXACTLY):',
       '- You will receive a SELECTED CODE BLOCK and some SURROUNDING CONTEXT.',
@@ -612,6 +728,7 @@ export class GroqClient {
       '- Maintain the same indentation level as the original selected code.',
       '- Keep all unchanged lines within the selection exactly as they are.',
       '- Apply ONLY what the user asked for. Do not refactor or restyle untouched code.',
+      '- Works for ANY language or framework — adapt to what is in the code.',
     ].join('\n');
 
     let userPrompt = `Language: ${language}\nInstruction: ${instruction}\n\n`;
@@ -637,6 +754,17 @@ export class GroqClient {
     const roomLeft = modelWindow - inputTokens - 100;
     const maxTokens = Math.min(desiredOutput, Math.max(roomLeft, 1500));
 
+    // Non-streaming fallback for Anthropic and Gemini
+    if (config.provider === 'anthropic' || config.provider === 'gemini') {
+      const result = await this.requestCompletion(
+        [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        { maxTokens }
+      );
+      const cleaned = this.cleanResponse(result.content);
+      onChunk(cleaned);
+      return cleaned;
+    }
+
     const body = JSON.stringify({
       model: config.model,
       messages: [
@@ -651,7 +779,7 @@ export class GroqClient {
     let accumulated = '';
 
     await new Promise<void>((resolve, reject) => {
-      const url = new URL(this.baseUrl);
+      const url = new URL(config.baseUrl);
       const options: https.RequestOptions = {
         hostname: url.hostname,
         path: url.pathname,
@@ -668,7 +796,7 @@ export class GroqClient {
           let errBody = '';
           res.on('data', (d: Buffer) => { errBody += d.toString(); });
           res.on('end', () => {
-            reject(new Error(`Groq API error (${res.statusCode}): ${errBody}`));
+            reject(new Error(`API error (${res.statusCode}): ${errBody}`));
           });
           return;
         }
@@ -730,25 +858,29 @@ export class GroqClient {
     const config = this.getConfig();
 
     if (!config.apiKey) {
-      vscode.window.showErrorMessage(
-        'Groq API key not set. Configure prompt2code.apiKey in settings.'
-      );
-      throw new Error('Missing Groq API key');
+      vscode.window.showErrorMessage(`API key not set for model ${config.model}.`);
+      throw new Error('Missing API key');
     }
 
     const systemPrompt = this.buildSystemPrompt(language, instruction, !!currentFileContent);
     const userPrompt = this.buildUserPrompt(instruction, language, context, currentFileContent);
 
-    // Ensure max_tokens doesn't exceed what the model can handle after input.
-    // We guarantee a minimum output budget — if input is too big, the context
-    // trimming in buildUserPrompt should have kept it in bounds, but we still
-    // clamp here as a safety net.
     const inputTokens = GroqClient.estimateTokens(systemPrompt + userPrompt);
     const modelWindow = GroqClient.MODEL_WINDOWS[config.model] ?? 8_000;
     const desiredOutput = Math.max(config.maxTokens ?? 0, 2048);
     const roomLeft = modelWindow - inputTokens - 100;
-    // Never go below 1500 tokens for output — that avoids truncated code
     const maxTokens = Math.min(desiredOutput, Math.max(roomLeft, 1500));
+
+    // Non-streaming fallback for Anthropic and Gemini
+    if (config.provider === 'anthropic' || config.provider === 'gemini') {
+      const result = await this.requestCompletion(
+        [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        { maxTokens }
+      );
+      const cleaned = this.cleanResponse(result.content);
+      onChunk(cleaned);
+      return cleaned;
+    }
 
     const body = JSON.stringify({
       model: config.model,
@@ -764,7 +896,7 @@ export class GroqClient {
     let accumulated = '';
 
     await new Promise<void>((resolve, reject) => {
-      const url = new URL(this.baseUrl);
+      const url = new URL(config.baseUrl);
       const options: https.RequestOptions = {
         hostname: url.hostname,
         path: url.pathname,
@@ -781,7 +913,7 @@ export class GroqClient {
           let errBody = '';
           res.on('data', (d: Buffer) => { errBody += d.toString(); });
           res.on('end', () => {
-            reject(new Error(`Groq API error (${res.statusCode}): ${errBody}`));
+            reject(new Error(`API error (${res.statusCode}): ${errBody}`));
           });
           return;
         }
@@ -858,7 +990,7 @@ export class GroqClient {
           stream: true
         });
 
-        const url = new URL(this.baseUrl);
+        const url = new URL(config.baseUrl);
         const contOptions: https.RequestOptions = {
           hostname: url.hostname,
           path: url.pathname,
@@ -933,7 +1065,10 @@ export class GroqClient {
       {
         role: 'system',
         content:
-          'You are a code completion assistant. Output ONLY the missing code. No markdown. No explanations.'
+          'You are a world-class code completion assistant proficient in every language and framework. '
+          + 'Output ONLY the missing code that logically fits at the cursor position. '
+          + 'Match the surrounding code style, indentation, and conventions exactly. '
+          + 'No markdown. No explanations. No code fences. Just the code.'
       },
       {
         role: 'user',
@@ -1041,140 +1176,71 @@ Complete the code at the cursor position.`
   // ===========================
 
   private buildSystemPrompt(language: string, instruction: string, isUpdate: boolean = false): string {
-    const isUI = /\b(page|website|portfolio|landing|dashboard|form|card|navbar|header|footer|hero|section|layout|sidebar|modal|login|signup|register|profile|pricing|contact|about)\b/i.test(instruction);
-    const isHTML = language.toLowerCase() === 'html';
-    const isCSS = language.toLowerCase() === 'css' || language.toLowerCase() === 'scss';
-    const isReact = /react|jsx|tsx/i.test(language);
+    const isUI = /\b(page|website|portfolio|landing|dashboard|form|card|navbar|header|footer|hero|section|layout|sidebar|modal|login|signup|register|profile|pricing|contact|about|ui|ux|component|widget|panel|dialog|toast|menu|table|list|grid|chart|icon|button|input|select|checkbox|radio|toggle|tab|accordion|carousel|slider|tooltip|popover|badge|avatar|notification|progress|spinner|skeleton|breadcrumb|pagination|stepper|timeline|drawer|sheet|command|dropdown)\b/i.test(instruction);
 
-    if (isHTML && isUI) {
-      let prompt: string;
+    // ── Core identity (applies to EVERY prompt) ──
+    const coreRules = [
+      `You are a world-class full-stack developer proficient in EVERY programming language, framework, and tool.`,
+      `Your #1 priority is to FULLY satisfy the user's instruction — follow it to the letter.`,
+      '',
+      'UNIVERSAL RULES (ALWAYS FOLLOW):',
+      '- You work with ANY language, ANY framework, ANY codebase — never say you cannot.',
+      '- Read the user instruction carefully. Implement EXACTLY what was asked.',
+      '- Output ONLY valid, runnable code in the requested language/framework.',
+      '- Do NOT output markdown, code fences, or explanations unless the user explicitly asked.',
+      '- Do NOT add features, sections, or code the user did not request.',
+      '- Match the project\'s existing code style, naming conventions, imports, and patterns.',
+      '- Use the same libraries/frameworks already present — do NOT introduce new dependencies unless asked.',
+      '- Write clean, readable, well-structured, production-quality code.',
+    ];
 
-      if (isUpdate) {
-        prompt = [
-          'You are a senior front-end developer. You are in UPDATE MODE.',
-          '',
-          'CRITICAL UPDATE RULES (HIGHEST PRIORITY):',
-          '- You will receive the CURRENT FILE CONTENT. You MUST modify/update it.',
-          '- Do NOT regenerate the file from scratch.',
-          '- Preserve ALL existing sections, styles, scripts, and content the user did NOT mention.',
-          '- Apply ONLY the specific changes the user requested.',
-          '- Output the COMPLETE updated file with your changes applied.',
-          '',
-          'OUTPUT RULES:',
-          '- Output a COMPLETE HTML file (<!DOCTYPE html> to </html>).',
-          '- ALL CSS inside <style>, ALL JS inside <script>.',
-          '- No markdown. No code fences. Output ONLY raw HTML.',
-        ].join('\n');
-      } else {
-        prompt = [
-          'You are a senior front-end developer and UI/UX designer.',
-          'You produce stunning, professional, production-ready HTML pages.',
-          '',
-          'OUTPUT RULES:',
-          '- Output a COMPLETE, SINGLE HTML file with <!DOCTYPE html>, <html>, <head>, and <body>.',
-          '- ALL CSS MUST be inside a <style> tag in <head>. Do NOT use external stylesheets.',
-          '- ALL JavaScript MUST be inside a <script> tag before </body>. Do NOT use external scripts.',
-          '- Do NOT output markdown. Do NOT wrap in code fences. Output ONLY raw HTML.',
-        ].join('\n');
-      }
-
-      prompt += '\n' + [
-        'DESIGN RULES (CRITICAL):',
-        '- Use a modern, professional color palette (e.g., deep navy #0f172a, slate #1e293b, accent indigo #6366f1 or violet #8b5cf6, white text).',
-        '- Implement FULL responsive design with CSS media queries for mobile (<768px), tablet, and desktop.',
-        '- Use CSS Grid and/or Flexbox for all layouts — NEVER use float-based layouts.',
-        '- Use modern CSS: border-radius, box-shadow, smooth transitions (0.3s ease), backdrop-filter for glassmorphism if appropriate.',
-        '- Typography: Use a clean sans-serif font stack (system-ui, -apple-system, sans-serif) or import Google Fonts (Inter, Poppins, or similar).',
-        '- Buttons must have hover effects (color shift, scale, or shadow).',
-        '- Cards must have subtle shadows, rounded corners, and hover lift effects.',
-        '- Use proper spacing: generous padding (2rem+), consistent margins, line-height 1.6+.',
-        '- Navigation must be responsive with a hamburger menu on mobile.',
-        '- Hero sections should be full-width with large headings, gradient or image backgrounds.',
-        '- Forms must have styled inputs with focus states, proper labels, and visual feedback.',
-        '- Use placeholder images from https://picsum.photos/ for any image placeholders.',
-        '- Add smooth scroll behavior: html { scroll-behavior: smooth }.',
-        '- Include a subtle gradient or pattern for backgrounds where appropriate.',
-        '- Section padding should be at least 4rem top/bottom for breathing room.',
-        '- Use CSS custom properties (variables) for colors and reusable values.',
-        '',
-        'The result must look like a professionally designed website, NOT a basic unstyled page.',
-      ].join('\n');
-
-      return prompt;
-    }
-
-    if (isCSS && isUI) {
-      if (isUpdate) {
-        return [
-          'You are a senior CSS/UI designer. You are in UPDATE MODE.',
-          '',
-          'CRITICAL: Modify/update the CURRENT FILE CONTENT — do NOT regenerate from scratch.',
-          'Preserve all existing styles the user did NOT ask to change.',
-          'Apply ONLY the requested changes. Output the COMPLETE updated file.',
-          '',
-          'Use CSS Grid/Flexbox, custom properties, media queries, transitions, and shadows.',
-          'Output ONLY valid CSS. No markdown. No explanations.',
-        ].join('\n');
-      }
-      return [
-        'You are a senior CSS/UI designer.',
-        'Write modern, responsive, professional CSS.',
-        'Use CSS Grid/Flexbox, custom properties, media queries, transitions, and shadows.',
-        'Create visually polished, production-quality styles.',
-        'Output ONLY valid CSS. No markdown. No explanations.',
-      ].join('\n');
-    }
-
-    if (isReact && isUI) {
-      if (isUpdate) {
-        return [
-          'You are a senior React developer. You are in UPDATE MODE.',
-          '',
-          'CRITICAL: Modify/update the CURRENT FILE CONTENT — do NOT regenerate from scratch.',
-          'Preserve all existing components, hooks, state, and styles the user did NOT ask to change.',
-          'Apply ONLY the requested changes. Output the COMPLETE updated file.',
-          '',
-          'Use functional components with hooks. Professional responsive UI.',
-          'Output ONLY valid JSX/TSX code. No markdown. No explanations.',
-        ].join('\n');
-      }
-      return [
-        'You are a senior React developer and UI/UX designer.',
-        'Generate a professional, responsive React component with inline styles or a <style> tag.',
-        'Use functional components with hooks.',
-        'Apply modern design: proper color palette, spacing, shadows, hover effects, responsive breakpoints.',
-        'Use CSS-in-JS or inline style objects for all styling — do NOT reference external CSS files.',
-        'For images use https://picsum.photos/ placeholder URLs.',
-        'Output ONLY valid JSX/TSX code. No markdown. No explanations.',
-      ].join('\n');
-    }
-
-    // Default for non-UI or other languages
+    // ── UPDATE MODE rules ──
     if (isUpdate) {
       return [
-        `You are an expert ${language} developer. You are in UPDATE MODE.`,
+        ...coreRules,
         '',
-        'CRITICAL UPDATE RULES (HIGHEST PRIORITY):',
-        '- You will receive the CURRENT FILE CONTENT. You MUST modify/update it.',
-        '- Do NOT regenerate the file from scratch.',
-        '- Preserve ALL existing code, functions, logic, and structure the user did NOT mention.',
-        '- Apply ONLY the specific changes the user requested.',
+        'UPDATE MODE (HIGHEST PRIORITY):',
+        '- You will receive the CURRENT FILE CONTENT. You MUST modify/update it in-place.',
+        '- Do NOT regenerate or rewrite the file from scratch.',
+        '- Preserve ALL existing code, logic, styles, structure, and content the user did NOT mention.',
+        '- Apply ONLY the specific changes the user requested — nothing more, nothing less.',
         '- Output the COMPLETE updated file with your changes applied.',
-        '',
-        'Match existing code style, naming conventions, and patterns.',
-        'Use the same libraries and imports already present.',
-        'Output ONLY valid code. No markdown. No explanations.',
+        '- Keep the same indentation, formatting, and conventions used in the original file.',
       ].join('\n');
     }
+
+    // ── UI/UX generation rules (any language with UI keywords) ──
+    if (isUI) {
+      return [
+        ...coreRules,
+        '',
+        'UI / UX DESIGN RULES (CRITICAL — apply to any front-end language or framework):',
+        '- Design: Clean, minimal, modern. Prioritize whitespace, clarity, and visual hierarchy.',
+        '- Color: Use a refined, neutral palette — subtle grays, one accent color. Avoid over-saturation.',
+        '- Typography: Use the system font stack or a clean sans-serif (Inter, Poppins). Fluid sizing with clamp().',
+        '- Spacing: Generous, consistent padding and margins. Use a spacing scale (4/8/12/16/24/32/48px).',
+        '- Layout: CSS Grid and/or Flexbox (or the framework equivalent). Fully responsive — mobile-first.',
+        '- Components: Rounded corners, subtle shadows, smooth transitions (0.2s ease). Hover/focus states on all interactive elements.',
+        '- Forms: Styled inputs with focus rings, proper labels, clear validation feedback.',
+        '- Navigation: Responsive — collapses to a hamburger/drawer on mobile.',
+        '- Accessibility: Semantic elements, aria-labels, proper contrast ratios, keyboard navigable.',
+        '- Images: Use https://picsum.photos/ for placeholders.',
+        '- Micro-interactions: Subtle animations on hover, click, and page load (no janky motion).',
+        '- The result must feel like a polished, shipped product — not a prototype or wireframe.',
+        '',
+        'Adapt these rules to the specific framework the user is using (React, Vue, Svelte, Angular, HTML, Flutter, SwiftUI, etc.).',
+      ].join('\n');
+    }
+
+    // ── Default: pure code generation (any language) ──
     return [
-      `You are an expert ${language} developer.`,
-      'Generate clean, well-structured, responsive, production-ready code following industry best practices.',
-      'You will receive existing project files as context — study them carefully and:',
-      '- Match the existing code style, naming conventions, and patterns.',
-      '- Use the same libraries, frameworks, and imports already present in the project.',
-      '- Follow the project\'s directory structure conventions.',
-      '- Reuse existing utility functions or components when possible.',
-      'Output ONLY valid code. No markdown. No explanations.',
+      ...coreRules,
+      '',
+      'CODE GENERATION RULES:',
+      '- Follow industry best practices for the given language and framework.',
+      '- If project context/files are provided, study them carefully and stay consistent.',
+      '- Reuse existing utilities, components, and patterns when possible.',
+      '- Do NOT add unnecessary boilerplate or over-engineer beyond what was requested.',
     ].join('\n');
   }
 
@@ -1184,107 +1250,47 @@ Complete the code at the cursor position.`
     context?: string,
     currentFileContent?: string
   ): string {
-    const lang = language.toLowerCase();
-    const isUI = /\b(page|website|portfolio|landing|dashboard|form|card|navbar|header|footer|hero|section|layout|sidebar|modal|login|signup|register|profile|pricing|contact|about)\b/i.test(instruction);
+    // ── Build a universal, language-agnostic user prompt ──
+    let prompt = `Language / Framework: ${language}\n`;
+    prompt += `User Instruction: ${instruction}\n\n`;
+    prompt += 'Requirements:\n';
+    prompt += '- Implement EXACTLY what the user asked — nothing more, nothing less.\n';
+    prompt += '- Output ONLY valid, runnable code. No markdown. No code fences. No explanations.\n';
+    prompt += '- Follow best practices for the specified language/framework.\n';
+    prompt += '- Keep the code clean, minimal, and well-structured.\n';
 
-    let prompt = `Language: ${language}\nInstruction: ${instruction}\n\nConstraints:\n`;
-
-    switch (lang) {
-      case 'html':
-        if (isUI) {
-          prompt += [
-            '- Output a COMPLETE standalone HTML file (<!DOCTYPE html> to </html>).',
-            '- Embed ALL CSS in <style> and ALL JS in <script>.',
-            '- Must be fully responsive (mobile-first, media queries for 768px and 1024px breakpoints).',
-            '- Use a cohesive, modern color palette with CSS custom properties.',
-            '- Professional typography with proper font sizes (clamp() for fluid type).',
-            '- All interactive elements must have hover/focus states.',
-            '- Use semantic HTML5 elements (header, nav, main, section, footer).',
-            '- Include aria-labels for accessibility.',
-            '- Cards/sections need box-shadow, border-radius, and transition effects.',
-            '- Use Flexbox/Grid for layout — no tables for layout, no floats.',
-            '- Minimum 5 sections for a full page (hero, features/skills, projects/work, about, contact/footer).',
-            '- Navigation bar must collapse to hamburger on mobile.',
-            '- Smooth scroll between sections.',
-            '- Use https://picsum.photos/600/400 for placeholder images.',
-          ].join('\n');
-        } else {
-          prompt += '- Use semantic HTML5\n- Include accessibility attributes\n- Clean structure\n';
-        }
-        break;
-      case 'css':
-      case 'scss':
-        prompt += [
-          '- Responsive design with mobile-first approach.',
-          '- CSS Grid and Flexbox for layouts.',
-          '- CSS custom properties for theming.',
-          '- Smooth transitions and hover effects.',
-          '- Consistent spacing scale.',
-        ].join('\n');
-        break;
-      case 'javascript':
-      case 'typescript':
-        prompt += '- Use modern ES6+ syntax\n- Follow best practices\n- Clean, readable code\n';
-        break;
-      case 'javascriptreact':
-      case 'typescriptreact':
-        if (isUI) {
-          prompt += [
-            '- React functional component with hooks.',
-            '- Professional responsive UI with inline styles or embedded <style>.',
-            '- Modern color palette, shadows, rounded corners, hover effects.',
-            '- Mobile-first responsive design.',
-            '- Use https://picsum.photos/ for placeholder images.',
-          ].join('\n');
-        } else {
-          prompt += '- Use React functional components with hooks\n- Follow React best practices\n';
-        }
-        break;
-      default:
-        prompt += '- Follow language best practices\n- Clean, well-structured code\n';
-        break;
-    }
-
-    // ── Current file content (UPDATE mode): placed first, prominently ──
+    // ── Current file content (UPDATE mode) ──
     if (currentFileContent) {
       const charBudget = this.getContextCharBudget();
-      // Reserve 60% of context budget for the current file, 40% for other context
       const fileBudget = Math.floor(charBudget * 0.6);
       const trimmedFile = currentFileContent.length > fileBudget
         ? currentFileContent.slice(0, fileBudget) + '\n/* ...file truncated to fit model limits... */\n'
         : currentFileContent;
 
-      prompt += '\n\n========== CURRENT FILE CONTENT (MODIFY THIS — DO NOT REWRITE FROM SCRATCH) ==========\n'
-        + 'The code below is the EXISTING file in the editor. Your job is to UPDATE it.\n'
-        + 'RULES:\n'
-        + '1. Read the user\'s instruction and apply ONLY those changes.\n'
-        + '2. Keep ALL existing code, structure, and content that was NOT mentioned by the user.\n'
-        + '3. Output the COMPLETE file with your modifications applied (not a diff or snippet).\n'
-        + '4. Do NOT start a brand new file. Do NOT delete sections the user did not ask to remove.\n'
-        + '======================================================================================\n\n';
+      prompt += '\n========== CURRENT FILE (UPDATE THIS — DO NOT REWRITE FROM SCRATCH) ==========\n';
+      prompt += 'Modify this existing code. Apply ONLY the requested changes.\n';
+      prompt += 'Keep ALL existing code, structure, and content the user did NOT mention.\n';
+      prompt += 'Output the COMPLETE updated file.\n';
+      prompt += '=============================================================================\n\n';
       prompt += trimmedFile;
       prompt += '\n\n========== END OF CURRENT FILE ==========\n';
 
-      // Add remaining context with reduced budget
       if (context) {
         const ctxBudget = Math.floor(charBudget * 0.4);
         const trimmedContext = context.length > ctxBudget
           ? context.slice(0, ctxBudget) + '\n/* ...context trimmed... */\n'
           : context;
-        prompt += '\nAdditional project context (for reference only — do NOT copy structure from these, just match patterns):\n';
+        prompt += '\nProject context (reference only — match patterns, do NOT copy structure):\n';
         prompt += trimmedContext;
       }
     } else if (context) {
-      // New-file / generate mode: context as before
       const charBudget = this.getContextCharBudget();
       const trimmedContext = context.length > charBudget
         ? context.slice(0, charBudget) + '\n/* ...context trimmed to fit model limits... */\n'
         : context;
 
-      prompt += '\n\nIMPORTANT: The following project files are provided as context. '
-        + 'Study the existing code patterns, naming conventions, imports, and frameworks. '
-        + 'Your output MUST be consistent with the codebase.\n\n';
-      prompt += `Context:\n${trimmedContext}`;
+      prompt += '\nProject context — study these files and stay consistent with the codebase:\n\n';
+      prompt += trimmedContext;
     }
 
     return prompt;
