@@ -345,15 +345,33 @@ export class GroqClient {
     apiKey: string,
     options: { maxTokens: number; temperature: number }
   ): Promise<GroqCompletionResult> {
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      { model, messages, max_tokens: options.maxTokens, temperature: options.temperature },
-      { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 60000 }
-    );
-    const choice = response.data?.choices?.[0];
-    const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
-    if (!content) { throw new Error('OpenAI returned an empty response'); }
-    return { content, finishReason: choice?.finish_reason };
+    try {
+      const response = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        { model, messages, max_tokens: options.maxTokens, temperature: options.temperature },
+        { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 60000 }
+      );
+      const choice = response.data?.choices?.[0];
+      const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+      if (!content) { throw new Error('OpenAI returned an empty response'); }
+      return { content, finishReason: choice?.finish_reason };
+    } catch (error: any) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const apiMessage = error.response?.data?.error?.message || error.message;
+        if (status === 401) {
+          throw new Error(`OpenAI API key is invalid or expired (401). Please update your key in Configure Tools (⚙️). Details: ${apiMessage}`);
+        }
+        if (status === 429) {
+          throw new Error(`OpenAI rate limit exceeded (429). Please wait a moment and try again. Details: ${apiMessage}`);
+        }
+        if (status === 402 || status === 403) {
+          throw new Error(`OpenAI access denied (${status}). Check your billing/plan at platform.openai.com. Details: ${apiMessage}`);
+        }
+        throw new Error(`OpenAI API error (${status || 'network'}): ${apiMessage}`);
+      }
+      throw error;
+    }
   }
 
   /** Anthropic Claude models — different message/response format. */
@@ -375,13 +393,31 @@ export class GroqClient {
     }
     const body: Record<string, any> = { model, max_tokens: options.maxTokens, messages: anthropicMessages };
     if (system) { body.system = system; }
-    const response = await axios.post(
-      'https://api.anthropic.com/v1/messages', body,
-      { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 60000 }
-    );
-    const content = response.data?.content?.[0]?.text ?? '';
-    if (!content) { throw new Error('Anthropic returned an empty response'); }
-    return { content, finishReason: response.data?.stop_reason === 'max_tokens' ? 'length' : (response.data?.stop_reason ?? 'stop') };
+    try {
+      const response = await axios.post(
+        'https://api.anthropic.com/v1/messages', body,
+        { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 60000 }
+      );
+      const content = response.data?.content?.[0]?.text ?? '';
+      if (!content) { throw new Error('Anthropic returned an empty response'); }
+      return { content, finishReason: response.data?.stop_reason === 'max_tokens' ? 'length' : (response.data?.stop_reason ?? 'stop') };
+    } catch (error: any) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const apiMessage = error.response?.data?.error?.message || error.message;
+        if (status === 401) {
+          throw new Error(`Anthropic API key is invalid or expired (401). Please update your key in Configure Tools (⚙️). Get a key at console.anthropic.com/settings/keys`);
+        }
+        if (status === 429) {
+          throw new Error(`Anthropic rate limit exceeded (429). Please wait a moment and try again. Details: ${apiMessage}`);
+        }
+        if (status === 403) {
+          throw new Error(`Anthropic access denied (403). Check your account billing at console.anthropic.com. Details: ${apiMessage}`);
+        }
+        throw new Error(`Anthropic API error (${status || 'network'}): ${apiMessage}`);
+      }
+      throw error;
+    }
   }
 
   /** Google Gemini models — different message/response format. */
@@ -405,15 +441,33 @@ export class GroqClient {
       generationConfig: { maxOutputTokens: options.maxTokens, temperature: options.temperature },
     };
     if (systemInstruction) { body.systemInstruction = { parts: [{ text: systemInstruction }] }; }
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      body,
-      { headers: { 'content-type': 'application/json' }, timeout: 60000 }
-    );
-    const content = response.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    if (!content) { throw new Error('Gemini returned an empty response'); }
-    const rawFinish = response.data?.candidates?.[0]?.finishReason as string | undefined;
-    return { content, finishReason: rawFinish === 'MAX_TOKENS' ? 'length' : (rawFinish ?? 'stop') };
+    try {
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        body,
+        { headers: { 'content-type': 'application/json' }, timeout: 60000 }
+      );
+      const content = response.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      if (!content) { throw new Error('Gemini returned an empty response'); }
+      const rawFinish = response.data?.candidates?.[0]?.finishReason as string | undefined;
+      return { content, finishReason: rawFinish === 'MAX_TOKENS' ? 'length' : (rawFinish ?? 'stop') };
+    } catch (error: any) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const apiMessage = error.response?.data?.error?.message || error.message;
+        if (status === 400 && apiMessage?.includes('API key')) {
+          throw new Error(`Gemini API key is invalid (400). Please update your key in Configure Tools (⚙️). Get a key at aistudio.google.com/app/apikey`);
+        }
+        if (status === 401 || status === 403) {
+          throw new Error(`Gemini API key is invalid or unauthorized (${status}). Please update your key in Configure Tools (⚙️). Get a key at aistudio.google.com/app/apikey`);
+        }
+        if (status === 429) {
+          throw new Error(`Gemini rate limit exceeded (429). Please wait a moment and try again. Details: ${apiMessage}`);
+        }
+        throw new Error(`Gemini API error (${status || 'network'}): ${apiMessage}`);
+      }
+      throw error;
+    }
   }
 
   // ===========================
