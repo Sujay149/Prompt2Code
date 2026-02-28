@@ -88,7 +88,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Track the last active text editor so code-intent works even
     // when focus is inside the chat webview.
     this.lastTextEditor = vscode.window.activeTextEditor;
-    this.sendActiveFileToWebview(this.lastTextEditor);
     this.disposables.push(
       vscode.window.onDidChangeActiveTextEditor((editor) => {
         if (editor) {
@@ -108,6 +107,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this.getHtml(webviewView.webview);
+
+    // Now safe to send initial state (HTML is loaded)
+    this.sendActiveFileToWebview(this.lastTextEditor);
 
     // Send available models + current selection to webview
     this.sendModelListToWebview();
@@ -221,33 +223,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         case 'googleSignIn': {
-          console.log('🔐 Extension received googleSignIn request');
-          vscode.window.showInformationMessage('🔐 Starting Google Sign-In...');
-          if (this.authProvider) {
-            try {
-              const user = await this.authProvider.signIn();
-              console.log('🔐 Sign-in result:', user ? 'SUCCESS' : 'CANCELLED');
-              
-              if (user) {
-                vscode.window.showInformationMessage(`✅ Signed in as ${user.name || user.email}`);
-                // Send auth state DIRECTLY with the user data we already have
-                // This avoids any async storage timing issues
-                this._view?.webview.postMessage({ type: 'authState', signedIn: true, user });
-              } else {
-                vscode.window.showWarningMessage('Google Sign-In was cancelled.');
-                this._view?.webview.postMessage({ type: 'authState', signedIn: false, user: null });
-              }
-              
-              // Also send via the standard method as backup
-              await this.sendAuthStateToWebview();
-            } catch (error: any) {
-              console.error('❌ Sign-in error:', error);
-              vscode.window.showErrorMessage(`Sign-in failed: ${error.message}`);
+          // Handle Google Sign-In request from webview
+          if (!this.authProvider) {
+            vscode.window.showErrorMessage('Authentication system not initialized. Please reload VS Code.');
+            this._view?.webview.postMessage({ type: 'authState', signedIn: false, user: null });
+            this._view?.webview.postMessage({ type: 'error', message: 'Authentication system not initialized. Please reload the window (Ctrl+Shift+P → Reload Window).' });
+            break;
+          }
+          console.log('🔐 Extension received googleSignIn message, starting OAuth flow…');
+          try {
+            const user = await this.authProvider.signIn();
+            if (user) {
+              vscode.window.showInformationMessage(`✅ Signed in as ${user.name || user.email}`);
+              this._view?.webview.postMessage({ type: 'authState', signedIn: true, user });
+            } else {
+              vscode.window.showWarningMessage('Google Sign-In was cancelled or failed. Check the browser tab.');
               this._view?.webview.postMessage({ type: 'authState', signedIn: false, user: null });
+              this._view?.webview.postMessage({ type: 'error', message: 'Google Sign-In was cancelled or failed. Please check your browser and try again.' });
             }
-          } else {
-            console.error('❌ Auth provider not initialized');
-            vscode.window.showErrorMessage('Authentication system not initialized');
+            // Always refresh auth state after sign-in attempt
+            await this.sendAuthStateToWebview();
+          } catch (error: any) {
+            console.error('❌ Sign-in error:', error);
+            vscode.window.showErrorMessage(`Sign-in failed: ${error.message}`);
+            this._view?.webview.postMessage({ type: 'authState', signedIn: false, user: null });
+            this._view?.webview.postMessage({ type: 'error', message: `Sign-in failed: ${error.message}` });
           }
           break;
         }
@@ -2408,22 +2408,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private getHtml(webview: vscode.Webview): string {
     const nonce = this.getNonce();
     return `<!DOCTYPE html>
-<html lang="en" style="height:100%;">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: https://*.googleusercontent.com ${webview.cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource}; img-src data: https://*.googleusercontent.com ${webview.cspSource};">
 <style>
+  html, body { height: 100%; min-height: 100vh; margin: 0; padding: 0; }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 0;
     font-family: var(--vscode-font-family);
-    background: var(--vscode-sideBar-background);
-    color: var(--vscode-foreground);
-    height: 100%;
+    background: var(--vscode-sideBar-background, #1e1e1e);
+    color: var(--vscode-foreground, #ccc);
+    height: 100vh;
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
     position: relative;
+    overflow: hidden;
   }
 
   /* ── Sessions Panel ── */
@@ -2790,8 +2793,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   /* ── Login overlay ── */
   .login-overlay {
-    position: absolute; inset: 0; z-index: 999;
-    background: var(--vscode-sideBar-background);
+    position: fixed; inset: 0; z-index: 999;
+    background: var(--vscode-sideBar-background, #1e1e1e);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 16px; padding: 24px; text-align: center;
   }
@@ -2841,14 +2844,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   /* ── Settings / Configure-Tools Modal ── */
   .settings-backdrop {
-    display: none; position: absolute; inset: 0; z-index: 500;
+    display: none; position: fixed; inset: 0; z-index: 500;
     background: rgba(0,0,0,0.45);
   }
   .settings-backdrop.open { display: block; }
   .settings-modal {
-    position: absolute; inset: 0; z-index: 501;
+    position: fixed; inset: 0; z-index: 501;
     display: none; flex-direction: column;
-    background: var(--vscode-sideBar-background);
+    background: var(--vscode-sideBar-background, #1e1e1e);
     border: 1px solid var(--vscode-panel-border);
     border-radius: 0;
     overflow: hidden;
@@ -2948,7 +2951,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </style>
 </head>
 
-<body style="position:relative;">
+<body>
   <!-- LOGIN OVERLAY -->
   <div class="login-overlay" id="loginOverlay">
     <div class="logo">🚀</div>
@@ -3131,6 +3134,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const userAvatar = document.getElementById('userAvatar');
   const userName = document.getElementById('userName');
   const signOutBtn = document.getElementById('signOutBtn');
+
+  // ── Error message display for login overlay ──
+  function showLoginError(message) {
+    const overlay = document.getElementById('loginOverlay');
+    if (!overlay) return;
+    let err = document.getElementById('loginErrorMsg');
+    if (!err) {
+      err = document.createElement('div');
+      err.id = 'loginErrorMsg';
+      err.style.color = '#f48771';
+      err.style.fontSize = '13px';
+      err.style.marginTop = '12px';
+      overlay.appendChild(err);
+    }
+    err.textContent = message;
+    err.style.display = 'block';
+  }
 
   // Current auth state
   let isSignedIn = false;
@@ -3620,7 +3640,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (typingIndicator) typingIndicator.className = msg.isLoading ? 'typing active' : 'typing';
     }
     if (msg.type === 'clearMessages' && chat) chat.innerHTML = '';
-    if (msg.type === 'error') add('Error', msg.message, 'assistant');
+    if (msg.type === 'error') {
+      showLoginError(msg.message);
+      if (isSignedIn) add('Error', msg.message, 'assistant');
+    }
     if (msg.type === 'modeChanged') {
       currentMode = msg.mode;
       if (modeSelect) modeSelect.value = msg.mode;
@@ -4043,7 +4066,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     let html = '';
-    const lines = text.split('\n');
+    const lines = text.split('\\n');
     let currentFiles = [];
     let currentType = '';
     let inDiff = false;
@@ -4073,7 +4096,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (/📋 Changes made to/.test(dl)) {
           line = '<span class="diff-title">' + line + '</span>';
         }
-        html += line + '\n';
+        html += line + '\\n';
       }
       html += '</div>';
       diffLines = [];
