@@ -1400,18 +1400,27 @@ Complete the code at the cursor position.`
       'UNIVERSAL RULES (ALWAYS FOLLOW):',
       '- You work with ANY language, ANY framework, ANY codebase — never say you cannot.',
       '- Read the user instruction carefully. Implement EXACTLY what was asked.',
-      '- Output ONLY valid, runnable code in the requested language/framework.',
-      '- Do NOT output markdown, code fences, or explanations unless the user explicitly asked.',
       '- Do NOT add features, sections, or code the user did not request.',
       '- Match the project\'s existing code style, naming conventions, imports, and patterns.',
       '- Use the same libraries/frameworks already present — do NOT introduce new dependencies unless asked.',
       '- Write clean, readable, well-structured, production-quality code.',
     ];
 
+    // ── Copilot-like intent routing ──
+    const intentRules = [
+      'INTENT ROUTING (COPILOT-LIKE):',
+      '- If the user asks a question, summary, review, or explanation, reply in concise natural language (bullets allowed).',
+      '- If the user asks for code creation or modification, output ONLY the necessary code (no markdown or fences) unless they explicitly asked for commentary.',
+      '- If the request is ambiguous, ask ONE brief clarifying question before proceeding.',
+      '- Prefer actionable output that the user can paste or apply directly.',
+    ];
+
     // ── UPDATE MODE rules ──
     if (isUpdate) {
       return [
         ...coreRules,
+        '',
+        ...intentRules,
         '',
         'UPDATE MODE (HIGHEST PRIORITY):',
         '- You will receive the CURRENT FILE CONTENT. You MUST modify/update it in-place.',
@@ -1427,6 +1436,8 @@ Complete the code at the cursor position.`
     if (isUI) {
       return [
         ...coreRules,
+        '',
+        ...intentRules,
         '',
         'UI / UX DESIGN RULES (CRITICAL — apply to any front-end language or framework):',
         '- Design: Clean, minimal, modern. Prioritize whitespace, clarity, and visual hierarchy.',
@@ -1450,6 +1461,8 @@ Complete the code at the cursor position.`
     return [
       ...coreRules,
       '',
+      ...intentRules,
+      '',
       'CODE GENERATION RULES:',
       '- Follow industry best practices for the given language and framework.',
       '- If project context/files are provided, study them carefully and stay consistent.',
@@ -1469,7 +1482,8 @@ Complete the code at the cursor position.`
     prompt += `User Instruction: ${instruction}\n\n`;
     prompt += 'Requirements:\n';
     prompt += '- Implement EXACTLY what the user asked — nothing more, nothing less.\n';
-    prompt += '- Output ONLY valid, runnable code. No markdown. No code fences. No explanations.\n';
+    prompt += '- If the user requested code, output ONLY the necessary code (no markdown/fences/explanations) unless they explicitly asked for commentary.\n';
+    prompt += '- If the user asked for an explanation/summary/review, reply concisely in natural language.\n';
     prompt += '- Follow best practices for the specified language/framework.\n';
     prompt += '- Keep the code clean, minimal, and well-structured.\n';
 

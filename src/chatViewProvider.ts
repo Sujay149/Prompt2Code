@@ -534,6 +534,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return summary;
   }
 
+  /**
+   * Provide lightweight local replies for casual chat (greetings, thanks, farewells)
+   * so we do not call the LLM for trivial exchanges.
+   */
+  private getQuickReply(message: string): string | null {
+    const text = message.trim();
+    if (!text) { return null; }
+
+    const lower = text.toLowerCase();
+
+    if (/^(hi|hello|hey|hiya|yo|hola)\b/.test(lower)) {
+      return 'Hi! How can I help you today?';
+    }
+
+    if (/^good (morning|afternoon|evening)\b/.test(lower)) {
+      return 'Hello! How can I help you today?';
+    }
+
+    if (/^(thanks|thank you|ty)\b/.test(lower)) {
+      return "You're welcome! What can I help with next?";
+    }
+
+    if (/^(bye|goodbye|see ya|see you|cya)\b/.test(lower)) {
+      return 'Goodbye! If you need help later, just ask.';
+    }
+
+    if (/^(how are you|how\s*r\s*u|what's up|whats up|sup)\b/.test(lower) && text.length <= 40) {
+      return "I'm here and ready to help. What can I do for you?";
+    }
+
+    return null;
+  }
+
   // ===========================
   // MESSAGE HANDLING
   // ===========================
@@ -569,6 +602,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // 2️⃣ Save conversation (for chat mode history)
     this.conversationHistory.push({ role: 'user', content: enrichedMessage });
+
+    // 2.5️⃣ Quick local reply for casual chat (no LLM call)
+    const quickReply = this.getQuickReply(message);
+    if (quickReply) {
+      this.conversationHistory.push({ role: 'assistant', content: quickReply });
+      this._view?.webview.postMessage({ type: 'assistantMessage', message: quickReply });
+      return;
+    }
 
     // 3️⃣ Route to the appropriate handler based on mode
     switch (this.currentMode) {
@@ -655,6 +696,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             '- Provide clear, concise explanations with code snippets only when helpful.\n' +
             '- If the user asks you to change/edit/create code, remind them to switch to Agent mode.\n' +
             '- Use minimal markdown. Keep responses focused and readable.\n' +
+            '- Mirror the user\'s tone; keep greetings short (e.g., "Hi! How can I help?").\n' +
             '- Reference specific line numbers and function names when explaining code.'
         },
         ...this.conversationHistory.slice(0, -1),
