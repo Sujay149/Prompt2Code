@@ -65,10 +65,7 @@ export class GoogleAuthProvider {
 
   /* ── Sign-in ── */
   async signIn(): Promise<UserInfo | null> {
-    if (!GOOGLE_CLIENT_ID) {
-      vscode.window.showErrorMessage('Missing GOOGLE_CLIENT_ID in .env');
-      return null;
-    }
+    // Always use hardcoded client ID for all users
 
     const state = crypto.randomBytes(16).toString('hex');
     const codeVerifier = generateCodeVerifier();
@@ -104,14 +101,19 @@ export class GoogleAuthProvider {
           const redirectUri = `http://127.0.0.1:${boundPort}/callback`;
           const tokenRes = await axios.post(
             GOOGLE_TOKEN_URL,
-            new URLSearchParams({
-              code,
-              client_id: GOOGLE_CLIENT_ID,
-              redirect_uri: redirectUri,
-              grant_type: 'authorization_code',
-              code_verifier: codeVerifier,
-              ...(GOOGLE_CLIENT_SECRET ? { client_secret: GOOGLE_CLIENT_SECRET } : {}),
-            }).toString(),
+            (() => {
+              const params = new URLSearchParams({
+                code,
+                client_id: GOOGLE_CLIENT_ID,
+                redirect_uri: redirectUri,
+                grant_type: 'authorization_code',
+                code_verifier: codeVerifier,
+              });
+              if (GOOGLE_CLIENT_SECRET) {
+                params.append('client_secret', GOOGLE_CLIENT_SECRET);
+              }
+              return params.toString();
+            })(),
             { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
           );
 
@@ -140,8 +142,17 @@ export class GoogleAuthProvider {
           cleanup();
           this._onDidChangeAuth.fire(true);
           resolve(userInfo);
-        } catch (err: any) {
-          console.error('Google OAuth token exchange failed:', err?.response?.data ?? err.message);
+        } catch (err: unknown) {
+          let errorMsg = '';
+          if (typeof err === 'object' && err !== null && 'response' in err) {
+            const e = err as { response?: { data?: string }; message?: string };
+            errorMsg = e.response?.data ?? e.message ?? String(err);
+          } else if (err instanceof Error) {
+            errorMsg = err.message;
+          } else {
+            errorMsg = String(err);
+          }
+          console.error('Google OAuth token exchange failed:', errorMsg);
           this.sendHtml(res, '❌ Authentication error', 'Please close this tab and try again.');
           cleanup();
           resolve(null);
@@ -181,8 +192,17 @@ export class GoogleAuthProvider {
         const port = PORT_RANGE[portIndex];
         // Remove any previous error listener so it doesn't fire for old attempts
         server.removeAllListeners('error');
-        server.once('error', (err: any) => {
-          console.warn(`Auth server: port ${port} failed (${err.code || err.message}), trying next…`);
+        server.once('error', (err: unknown) => {
+          let errorMsg = '';
+          if (typeof err === 'object' && err !== null && 'code' in err) {
+            const e = err as { code?: string; message?: string };
+            errorMsg = e.code ?? e.message ?? String(err);
+          } else if (err instanceof Error) {
+            errorMsg = err.message;
+          } else {
+            errorMsg = String(err);
+          }
+          console.warn(`Auth server: port ${port} failed (${errorMsg}), trying next…`);
           if (portIndex + 1 < PORT_RANGE.length) {
             tryListen(portIndex + 1);
           } else {
@@ -258,12 +278,17 @@ export class GoogleAuthProvider {
     try {
       const res = await axios.post(
         GOOGLE_TOKEN_URL,
-        new URLSearchParams({
-          client_id: GOOGLE_CLIENT_ID,
-          refresh_token: refreshToken,
-          grant_type: 'refresh_token',
-          ...(GOOGLE_CLIENT_SECRET ? { client_secret: GOOGLE_CLIENT_SECRET } : {}),
-        }).toString(),
+        (() => {
+          const params = new URLSearchParams({
+            client_id: GOOGLE_CLIENT_ID,
+            refresh_token: refreshToken,
+            grant_type: 'refresh_token',
+          });
+          if (GOOGLE_CLIENT_SECRET) {
+            params.append('client_secret', GOOGLE_CLIENT_SECRET);
+          }
+          return params.toString();
+        })(),
         { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
       );
 

@@ -270,8 +270,9 @@ function registerCommands(context: vscode.ExtensionContext) {
           const code = await groqClient.generateCode(instruction, language, context);
           await createWorkspaceFile(fileName, code);
           vscode.window.showInformationMessage(`Created ${fileName}`);
-        } catch (err: any) {
-          vscode.window.showErrorMessage(`Failed to create file: ${err.message}`);
+        } catch (err: unknown) {
+          const errorMsg = (err instanceof Error) ? err.message : String(err);
+          vscode.window.showErrorMessage(`Failed to create file: ${errorMsg}`);
         }
       }
     );
@@ -296,8 +297,8 @@ function registerInlineCompletionProvider(context: vscode.ExtensionContext) {
     async provideInlineCompletionItems(
       document: vscode.TextDocument,
       position: vscode.Position,
-      context: vscode.InlineCompletionContext,
-      token: vscode.CancellationToken
+      _context: vscode.InlineCompletionContext,
+      _token: vscode.CancellationToken
     ): Promise<vscode.InlineCompletionItem[] | vscode.InlineCompletionList | null> {
       
       // Check if inline completions are enabled
