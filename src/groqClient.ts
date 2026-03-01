@@ -42,6 +42,50 @@ export class GroqClient {
   private readonly baseUrl =
     'https://api.groq.com/openai/v1/chat/completions';
 
+  private static readonly OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+
+  /**
+   * Map internal model IDs to OpenRouter model IDs.
+   * OpenRouter uses provider-prefixed model names.
+   */
+  private static readonly OPENROUTER_MODEL_MAP: Record<string, string> = {
+    // Groq-hosted models → OpenRouter equivalents
+    'llama-3.3-70b-versatile':   'meta-llama/llama-3.3-70b-instruct',
+    'llama-3.1-70b-versatile':   'meta-llama/llama-3.1-70b-instruct',
+    'llama-3.1-8b-instant':      'meta-llama/llama-3.1-8b-instruct',
+    'llama-3.2-1b-preview':      'meta-llama/llama-3.2-1b-instruct',
+    'llama-3.2-3b-preview':      'meta-llama/llama-3.2-3b-instruct',
+    'mixtral-8x7b-32768':        'mistralai/mixtral-8x7b-instruct',
+    'gemma2-9b-it':              'google/gemma-2-9b-it',
+    'meta-llama/llama-4-scout-17b-16e-instruct': 'meta-llama/llama-4-scout-17b-16e-instruct',
+    'openai/gpt-oss-120b':       'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b':        'openai/gpt-oss-20b',
+    // OpenAI
+    'gpt-4o':      'openai/gpt-4o',
+    'gpt-4o-mini': 'openai/gpt-4o-mini',
+    'o1-mini':     'openai/o1-mini',
+    'o3-mini':     'openai/o3-mini',
+    // Anthropic
+    'claude-opus-4-20250514':     'anthropic/claude-opus-4',
+    'claude-sonnet-4-20250514':   'anthropic/claude-sonnet-4',
+    'claude-3-5-haiku-20241022':  'anthropic/claude-3.5-haiku',
+    'claude-3-5-sonnet-20241022': 'anthropic/claude-3.5-sonnet',
+    // Gemini
+    'gemini-2.0-flash': 'google/gemini-2.0-flash-001',
+    'gemini-1.5-pro':   'google/gemini-pro-1.5',
+    'gemini-1.5-flash': 'google/gemini-flash-1.5',
+  };
+
+  /** Check if an API key is an OpenRouter key. */
+  private static isOpenRouterKey(apiKey: string): boolean {
+    return apiKey.trim().startsWith('sk-or-');
+  }
+
+  /** Map an internal model ID to the OpenRouter equivalent. */
+  private static toOpenRouterModel(modelId: string): string {
+    return GroqClient.OPENROUTER_MODEL_MAP[modelId] || modelId;
+  }
+
   /**
    * Approximate context-window sizes (input tokens) for Groq models.
    * We leave room for output (max_tokens) so the *input* budget is
@@ -68,9 +112,10 @@ export class GroqClient {
     'o1-mini':                   128_000,
     'o3-mini':                   200_000,
     // Anthropic
-    'claude-3-5-sonnet-20241022': 200_000,
+    'claude-opus-4-20250514':     200_000,
+    'claude-sonnet-4-20250514':   200_000,
     'claude-3-5-haiku-20241022':  200_000,
-    'claude-3-opus-20240229':     200_000,
+    'claude-3-5-sonnet-20241022': 200_000,
     // Gemini
     'gemini-2.0-flash':    1_000_000,
     'gemini-1.5-pro':      2_000_000,
@@ -96,9 +141,10 @@ export class GroqClient {
     { id: 'o1-mini',     label: 'o1 Mini',       ctx: '128K', provider: 'openai' },
     { id: 'o3-mini',     label: 'o3 Mini',       ctx: '200K', provider: 'openai' },
     // ── Anthropic ──
-    { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', ctx: '200K', provider: 'anthropic' },
+    { id: 'claude-opus-4-20250514',     label: 'Claude Opus 4',     ctx: '200K', provider: 'anthropic' },
+    { id: 'claude-sonnet-4-20250514',   label: 'Claude Sonnet 4',   ctx: '200K', provider: 'anthropic' },
     { id: 'claude-3-5-haiku-20241022',  label: 'Claude 3.5 Haiku',  ctx: '200K', provider: 'anthropic' },
-    { id: 'claude-3-opus-20240229',     label: 'Claude 3 Opus',     ctx: '200K', provider: 'anthropic' },
+    { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', ctx: '200K', provider: 'anthropic' },
     // ── Google Gemini ──
     { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', ctx: '1M',  provider: 'gemini' },
     { id: 'gemini-1.5-pro',   label: 'Gemini 1.5 Pro',   ctx: '2M',  provider: 'gemini' },
@@ -226,7 +272,23 @@ export class GroqClient {
   async validateApiKey(apiKey: string, modelId?: string): Promise<{ valid: boolean; error?: string }> {
     const provider = GroqClient.getProviderForModel(modelId ?? 'llama-3.1-8b-instant');
     try {
-      if (provider === 'openai') {
+      // OpenRouter keys: validate via OpenRouter regardless of selected model
+      if (GroqClient.isOpenRouterKey(apiKey)) {
+        const orModel = GroqClient.toOpenRouterModel(modelId || 'meta-llama/llama-3.1-8b-instruct');
+        await axios.post(
+          GroqClient.OPENROUTER_URL,
+          { model: orModel, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 },
+          {
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://github.com/Sujay149/Prompt2Code',
+              'X-Title': 'Prompt2Code',
+            },
+            timeout: 15000,
+          }
+        );
+      } else if (provider === 'openai') {
         await axios.post(
           'https://api.openai.com/v1/chat/completions',
           { model: modelId || 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 },
@@ -235,7 +297,7 @@ export class GroqClient {
       } else if (provider === 'anthropic') {
         await axios.post(
           'https://api.anthropic.com/v1/messages',
-          { model: modelId || 'claude-3-5-haiku-20241022', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] },
+          { model: modelId || 'claude-sonnet-4-20250514', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] },
           { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 15000 }
         );
       } else if (provider === 'gemini') {
@@ -259,6 +321,9 @@ export class GroqClient {
       if (status === 401 || status === 403) {
         return { valid: false, error: 'Invalid API key — authentication failed.' };
       }
+      if (status === 402) {
+        return { valid: false, error: 'Insufficient credits — please top up your account.' };
+      }
       return { valid: false, error: error.message || 'Validation request failed.' };
     }
   }
@@ -279,6 +344,11 @@ export class GroqClient {
       throw new Error(`Missing API key for ${config.provider}`);
     }
 
+    // If the key is an OpenRouter key, route ALL models through OpenRouter
+    if (GroqClient.isOpenRouterKey(config.apiKey)) {
+      return this.requestOpenRouter(messages, config.model, config.apiKey, { maxTokens, temperature });
+    }
+
     if (config.provider === 'openai') {
       return this.requestOpenAI(messages, config.model, config.apiKey, { maxTokens, temperature });
     } else if (config.provider === 'anthropic') {
@@ -288,6 +358,85 @@ export class GroqClient {
     } else {
       return this.requestGroq(messages, config.model, config.apiKey, { maxTokens, temperature });
     }
+  }
+
+  /** OpenRouter — unified gateway; uses OpenAI-compatible format. */
+  private async requestOpenRouter(
+    messages: GroqMessage[],
+    model: string,
+    apiKey: string,
+    options: { maxTokens: number; temperature: number }
+  ): Promise<GroqCompletionResult> {
+    const openRouterModel = GroqClient.toOpenRouterModel(model);
+    const MAX_RETRIES = 2;
+    let currentMaxTokens = options.maxTokens;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await axios.post(
+          GroqClient.OPENROUTER_URL,
+          {
+            model: openRouterModel,
+            messages,
+            max_tokens: currentMaxTokens,
+            temperature: options.temperature,
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://github.com/Sujay149/Prompt2Code',
+              'X-Title': 'Prompt2Code',
+            },
+            timeout: 90000,
+          }
+        );
+        const choice = response.data?.choices?.[0];
+        const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+        if (!content || !content.trim()) { throw new Error('OpenRouter returned an empty response'); }
+        return { content, finishReason: choice?.finish_reason };
+      } catch (error: any) {
+        if (axios.isAxiosError(error)) {
+          const status = error.response?.status;
+          const apiMessage = error.response?.data?.error?.message || error.message;
+          if (status === 401) {
+            throw new Error(`OpenRouter API key is invalid or expired (401). Please update your key in Configure Tools (⚙️). Get a key at openrouter.ai/keys`);
+          }
+          if (status === 402 && attempt < MAX_RETRIES) {
+            // Try to parse how many tokens we can afford and retry with less
+            const affordMatch = apiMessage?.match(/can only afford (\d+)/);
+            if (affordMatch) {
+              const canAfford = parseInt(affordMatch[1], 10);
+              if (canAfford > 50) {
+                currentMaxTokens = Math.max(canAfford - 20, 50);
+                console.log(`💰 OpenRouter 402: reducing max_tokens to ${currentMaxTokens} and retrying`);
+                continue;
+              }
+            }
+            // If we can't parse, try halving
+            currentMaxTokens = Math.max(Math.floor(currentMaxTokens / 2), 100);
+            console.log(`💰 OpenRouter 402: halving max_tokens to ${currentMaxTokens} and retrying`);
+            continue;
+          }
+          if (status === 402) {
+            throw new Error(`OpenRouter: insufficient credits (402). Your free-tier balance is too low. Add credits at https://openrouter.ai/credits — or switch to a free model like Llama 3.1 8B.`);
+          }
+          if (status === 404) {
+            throw new Error(`OpenRouter: model "${openRouterModel}" not found (404). Try selecting a different model from the model picker.`);
+          }
+          if (status === 429 && attempt < MAX_RETRIES) {
+            await this.sleep(1000 * Math.pow(2, attempt));
+            continue;
+          }
+          if (status === 429) {
+            throw new Error(`OpenRouter rate limit exceeded (429). Please wait and try again.`);
+          }
+          throw new Error(`OpenRouter API error (${status || 'network'}): ${apiMessage}`);
+        }
+        throw error;
+      }
+    }
+    throw new Error('OpenRouter request failed after retries');
   }
 
   /** Groq (and Groq-hosted OSS models) via OpenAI-compatible endpoint with retry logic. */
@@ -642,22 +791,33 @@ export class GroqClient {
         ? GroqClient.VISION_MODEL
         : (this._modelOverride ?? config.model);
 
+      // Route through OpenRouter if key is an OpenRouter key
+      const isOR = GroqClient.isOpenRouterKey(apiKey);
+      const finalModel = isOR ? GroqClient.toOpenRouterModel(modelToUse) : modelToUse;
+      const url = isOR ? GroqClient.OPENROUTER_URL : this.baseUrl;
+
       const request = {
-        model: modelToUse,
+        model: finalModel,
         messages: callMessages,
         max_tokens: maxTokens,
         temperature: config.temperature,
         stream: false
       };
 
+      const headers: Record<string, string> = {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      };
+      if (isOR) {
+        headers['HTTP-Referer'] = 'https://github.com/Sujay149/Prompt2Code';
+        headers['X-Title'] = 'Prompt2Code';
+      }
+
       const response = await axios.post<GroqResponse>(
-        this.baseUrl,
+        url,
         request,
         {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json'
-          },
+          headers,
           timeout: 60000  // Vision requests may be slower
         }
       );
