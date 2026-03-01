@@ -1,119 +1,184 @@
-# Prompt2Code — AI Code Generation Inside VS Code
+<div align="center">
 
-Turn natural language prompts into real code directly inside VS Code.
+# 🚀 Prompt2Code
 
-Think: Prompt → Code → Done.
+### AI-powered code generation, chat, and inline completions — right inside VS Code
 
-## Why Prompt2Code?
+[![Version](https://img.shields.io/visual-studio-marketplace/v/SujayBabuThota.prompt2code?style=flat-square&color=4285f4&label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=SujayBabuThota.prompt2code)
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/SujayBabuThota.prompt2code?style=flat-square&color=3dc965)](https://marketplace.visualstudio.com/items?itemName=SujayBabuThota.prompt2code)
+[![Rating](https://img.shields.io/visual-studio-marketplace/r/SujayBabuThota.prompt2code?style=flat-square&color=f4b942)](https://marketplace.visualstudio.com/items?itemName=SujayBabuThota.prompt2code)
+[![License: MIT](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)](LICENSE)
 
-- Generate code faster from plain English
-- Context-aware (uses your current file & selection)
-- Create full UI pages with CSS
-- Chat with AI like Copilot Chat
-- Works across multiple languages
+**Write a comment. Get working code.**
 
-## Key Features
+</div>
 
-### AI Chat Sidebar
+---
 
-Chat with AI directly inside VS Code:
+## ✨ What is Prompt2Code?
 
-- Ask coding questions
-- Explain selected code
-- Convert code between languages
-- Generate components/pages and insert into the editor
+Prompt2Code brings the power of large language models directly into your editor. Describe what you want in plain English — as a comment, a chat message, or a prompt — and Prompt2Code generates production-ready code on the spot.
 
-Open it via:
+No context switching. No copy-pasting from a browser. Just you and your editor.
 
-- Click the chat icon in the Activity Bar
-- Or run **Prompt2Code: Open Chat**
+---
 
-### Prompt → Code Generation (Core Feature)
+## 🎯 Core Features
 
-Write instructions as comments, then run **Prompt2Code: Generate Code**.
+### 💬 AI Chat Sidebar
 
-Example:
+An intelligent chat panel built into the VS Code sidebar — similar to GitHub Copilot Chat.
+
+- **Ask Mode** — ask any coding question and get instant answers
+- **Agent Mode** — describe a feature and the AI creates + integrates files across your project
+- **Plan Mode** — break complex tasks into steps before generating code
+
+Open it from the Activity Bar or run `Prompt2Code: Open Chat`.
+
+---
+
+### ⚡ Comment → Code Generation
+
+Write your intent as a comment, then press `Ctrl+Shift+G` (`Cmd+Shift+G` on Mac). The extension replaces the comment with generated code instantly.
 
 ```html
-<!-- create a responsive registration form with full CSS -->
+<!-- create a responsive pricing page with 3 tiers and full CSS -->
 ```
 
-The extension replaces the instruction comment with generated code.
+```javascript
+// generate a debounce function with TypeScript types
+```
 
-### Inline Code Completion
+```css
+/* build a glassmorphism card with hover animation */
+```
 
-Copilot-style inline suggestions while typing. Press `Tab` to accept.
+---
+
+### 🧠 Inline AI Completions
+
+Copilot-style suggestions appear as you type. Press `Tab` to accept.
 
 ```javascript
 function calculateTotal(items) {
-  return items.
-  // → AI suggests: reduce((sum, i) => sum + i.price, 0);
-}
+  return items.reduce(          // ← AI suggests the full implementation
 ```
 
-## Supported Prompt Patterns
+---
 
-Prompt2Code understands instructions written as comments:
+### 🗂️ Multi-File Agent
 
-| Language | Example |
+Describe a component or feature and the Agent automatically:
+
+1. Creates new files with correct folder structure
+2. Writes the component or module
+3. Integrates it into existing files (imports, routes, exports)
+
+> Example: *"Create a reusable Modal component and add it to App.jsx"*
+
+---
+
+### 🖼️ Image → Code
+
+Attach a screenshot or mockup and describe what you need. The AI interprets the image and generates matching code.
+
+---
+
+## 🚀 Getting Started
+
+### 1 — Sign In
+
+Click **Sign in with Google** in the chat panel to activate the extension.
+
+### 2 — Add an API Key *(optional but recommended)*
+
+Go to the **Settings** (⚙️) inside the chat panel and paste your API key for any supported provider:
+
+| Provider | Where to get a key |
 |---|---|
-| HTML | `<!-- create a navbar -->` |
-| JS / TS | `// generate a login form` |
-| CSS | `/* create a card UI */` |
-| JSX / TSX | `// build a loading spinner` |
+| **Groq** | [console.groq.com](https://console.groq.com) — fast & free tier |
+| **OpenAI** | [platform.openai.com](https://platform.openai.com) |
+| **Anthropic** | [console.anthropic.com](https://console.anthropic.com) |
+| **Google Gemini** | [aistudio.google.com](https://aistudio.google.com) |
 
-Best keywords: `create`, `generate`, `build`, `convert`, `update`
+### 3 — Start Coding
 
-## Workflow
+- Open any file and write a prompt comment → `Ctrl+Shift+G`
+- Or open the chat sidebar and start a conversation
 
-1. Open a file (e.g. `index.html`, `App.jsx`, `styles.css`, `script.js`)
-2. Write a prompt in a comment
-3. Run **Prompt2Code: Generate Code** (`Ctrl+Shift+G` / `Cmd+Shift+G`)
-4. Iterate with another prompt
+---
 
-## Example Prompts
+## 💡 Example Prompts
 
-- `<!-- create a modern registration page with full CSS -->`
-- `// generate a loading spinner component`
-- `/* build a debounce function */`
-- `/* create a card with hover animation */`
+```
+<!-- create a modern login page with glassmorphism card and full CSS -->
+```
 
-## Commands
+```
+// build an Express REST API with CRUD routes for a User model
+```
 
-| Command | Description |
+```
+/* generate a responsive navbar with mobile hamburger menu */
+```
+
+```
+Create a React dashboard with charts using recharts, 
+integrate it into App.tsx with a /dashboard route
+```
+
+---
+
+## ⌨️ Commands
+
+| Command | Shortcut | Description |
+|---|---|---|
+| `Prompt2Code: Open Chat` | — | Open the AI chat panel |
+| `Prompt2Code: Generate Code` | `Ctrl+Shift+G` | Generate from prompt comment |
+| `Prompt2Code: Enable Inline Suggestions` | — | Turn on Tab completions |
+| `Prompt2Code: Disable Inline Suggestions` | — | Turn off Tab completions |
+
+---
+
+## 🔧 Settings
+
+| Setting | Default | Description |
+|---|---|---|
+| `prompt2code.model` | `llama-3.3-70b-versatile` | Active AI model |
+| `prompt2code.maxTokens` | `4096` | Max response length |
+| `prompt2code.temperature` | `0.3` | Creativity (0 = precise, 1 = creative) |
+| `prompt2code.enableInlineCompletions` | `true` | Toggle inline suggestions |
+| `prompt2code.debounceMs` | `400` | Inline completion delay (ms) |
+
+---
+
+## 🌐 Supported Languages
+
+| Category | Languages |
 |---|---|
-| **Prompt2Code: Open Chat** | Open AI chat sidebar |
-| **Prompt2Code: Generate Code** | Generate code from a prompt comment |
-| **Prompt2Code: Enable Inline Suggestions** | Turn on inline AI |
-| **Prompt2Code: Disable Inline Suggestions** | Turn off inline AI |
+| Web | HTML, CSS, SCSS, JavaScript, TypeScript |
+| Frameworks | React (JSX/TSX), Next.js, Vue |
+| Backend | Node.js, Python, Java |
+| Other | JSON, Markdown, Shell |
 
-## Configuration
+---
 
-Configure via VS Code Settings → **Prompt2Code**:
+## 🔒 Privacy
 
-| Setting | Description |
-|---|---|
-| `prompt2code.apiKey` | Your Groq API key |
-| `prompt2code.model` | Groq model |
-| `prompt2code.maxTokens` | Response length |
-| `prompt2code.temperature` | Creativity level |
-| `prompt2code.enableInlineCompletions` | Enable/disable inline AI |
-| `prompt2code.debounceMs` | Inline completion debounce (ms) |
+- You sign in with Google for personalization only — no code is stored on our servers
+- API calls go **directly** from your machine to the AI provider you choose
+- Your API keys are stored locally in VS Code's encrypted secret storage
+- No telemetry beyond what VS Code itself collects
 
-## Supported Languages
+---
 
-- HTML / CSS / SCSS
-- JavaScript / TypeScript
-- React (JSX / TSX)
-- Python
-- Java
+## 🐛 Issues & Feedback
 
-## Privacy
+Found a bug or have a feature request?
+→ [Open an issue on GitHub](https://github.com/Sujay149/Prompt2Code/issues)
 
-- API calls go directly to the AI provider (Groq)
-- No code is stored by this extension
-- Your API key stays in your VS Code settings
+---
 
-## License
+## 📄 License
 
-MIT
+[MIT](LICENSE) © Sujay Babu Thota
