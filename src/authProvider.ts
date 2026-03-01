@@ -2,15 +2,12 @@ import * as vscode from 'vscode';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import axios from 'axios';
-import * as dotenv from 'dotenv';
-
-dotenv.config();
 
 /* ──────────────────────────────────────────────
- * Google OAuth 2.0 constants (PKCE flow — no secret required)
+ * Google OAuth 2.0 constants — injected at build time from .env
  * ────────────────────────────────────────────── */
-const GOOGLE_CLIENT_ID = '820264138125-3nqs28rdd1riavsu38li2iafoef5utdd.apps.googleusercontent.com';
-const GOOGLE_CLIENT_SECRET = '';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo';
@@ -143,17 +140,42 @@ export class GoogleAuthProvider {
           this._onDidChangeAuth.fire(true);
           resolve(userInfo);
         } catch (err: unknown) {
-          let errorMsg = '';
+          // Extract meaningful error details from Google's response
+          let errorMsg = 'Unknown error';
+          let googleError = '';
+          let googleDesc = '';
+
           if (typeof err === 'object' && err !== null && 'response' in err) {
-            const e = err as { response?: { data?: string }; message?: string };
-            errorMsg = e.response?.data ?? e.message ?? String(err);
+            const axiosErr = err as { response?: { status?: number; data?: Record<string, string> }; message?: string };
+            const data = axiosErr.response?.data;
+            if (data && typeof data === 'object') {
+              googleError = data.error || '';
+              googleDesc = data.error_description || '';
+              errorMsg = `${googleError}: ${googleDesc} (HTTP ${axiosErr.response?.status})`;
+            } else {
+              errorMsg = axiosErr.message || String(err);
+            }
           } else if (err instanceof Error) {
             errorMsg = err.message;
           } else {
             errorMsg = String(err);
           }
+
           console.error('Google OAuth token exchange failed:', errorMsg);
-          this.sendHtml(res, '❌ Authentication error', 'Please close this tab and try again.');
+          vscode.window.showErrorMessage(`Sign-in failed: ${errorMsg}`);
+
+          // Build a helpful hint based on the specific Google error
+          let hint = 'Please close this tab and try again.';
+          if (googleError === 'redirect_uri_mismatch') {
+            hint = `The redirect URI http://127.0.0.1:${boundPort}/callback is not authorized in your Google Cloud Console. ` +
+              'Add it under APIs & Services → Credentials → OAuth 2.0 Client → Authorized redirect URIs, or switch the client type to "Desktop".';
+          } else if (googleError === 'invalid_grant') {
+            hint = 'The authorization code expired or was already used. Please try signing in again.';
+          } else if (googleError === 'invalid_client') {
+            hint = 'The OAuth client ID or secret is invalid. Check your Google Cloud Console credentials.';
+          }
+
+          this.sendHtml(res, '❌ Authentication error', `${hint}<br><br><small style="opacity:0.5">${errorMsg}</small>`);
           cleanup();
           resolve(null);
         }
