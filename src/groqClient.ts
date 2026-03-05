@@ -122,6 +122,35 @@ export class GroqClient {
     'gemini-1.5-flash':    1_000_000,
   };
 
+  /** Special model ID for automatic model selection with fallback. */
+  static readonly AUTO_MODEL_ID = 'auto';
+
+  /**
+   * Fallback priority chain for Auto mode.
+   * When a model fails, the next in the list is tried.
+   * Ordered by capability / quality (best first).
+   */
+  static readonly AUTO_FALLBACK_CHAIN: string[] = [
+    'claude-sonnet-4-20250514',
+    'gpt-4o',
+    'gemini-2.0-flash',
+    'llama-3.3-70b-versatile',
+    'claude-3-5-sonnet-20241022',
+    'gpt-4o-mini',
+    'o3-mini',
+    'claude-3-5-haiku-20241022',
+    'gemini-1.5-pro',
+    'gemini-1.5-flash',
+    'llama-3.1-70b-versatile',
+    'llama-3.1-8b-instant',
+    'mixtral-8x7b-32768',
+    'gemma2-9b-it',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b',
+    'llama-3.2-3b-preview',
+    'llama-3.2-1b-preview',
+  ];
+
   /** Human-friendly model metadata for the selector UI. */
   static readonly AVAILABLE_MODELS: { id: string; label: string; ctx: string; provider: string }[] = [
     // ── Groq ──
@@ -169,14 +198,56 @@ export class GroqClient {
   /** Session-level model override (set by the UI model selector). */
   private _modelOverride: string | null = null;
 
+  /** The model that was actually used in the last Auto-mode request. */
+  private _lastResolvedModel: string | null = null;
+
   /** Set a session-level model override. Pass null to revert to settings. */
   setModelOverride(modelId: string | null): void {
     this._modelOverride = modelId;
   }
 
-  /** Get the currently active model (override or settings). */
+  /** Get the currently active model (override or settings). May be 'auto'. */
   getActiveModel(): string {
     return this._modelOverride ?? this.getConfig().model;
+  }
+
+  /** After an Auto-mode request, returns which model was actually used. */
+  getLastResolvedModel(): string | null {
+    return this._lastResolvedModel;
+  }
+
+  /** Check if current selection is Auto mode. */
+  isAutoMode(): boolean {
+    return this.getActiveModel() === GroqClient.AUTO_MODEL_ID;
+  }
+
+  /**
+   * Resolve the Auto model: return the first model in the fallback chain
+   * that has an API key configured. If none found, returns the first in chain.
+   */
+  resolveAutoModel(): string {
+    for (const modelId of GroqClient.AUTO_FALLBACK_CHAIN) {
+      const key = this.getApiKeyForModel(modelId);
+      if (key && key.trim()) {
+        return modelId;
+      }
+    }
+    // Fallback: return first model (will prompt for key)
+    return GroqClient.AUTO_FALLBACK_CHAIN[0];
+  }
+
+  /**
+   * Get the fallback chain starting after a given model.
+   * Only returns models that have API keys configured.
+   */
+  getFallbackModels(afterModel: string): string[] {
+    const chain = GroqClient.AUTO_FALLBACK_CHAIN;
+    const idx = chain.indexOf(afterModel);
+    const remaining = idx >= 0 ? chain.slice(idx + 1) : chain;
+    return remaining.filter(m => {
+      const key = this.getApiKeyForModel(m);
+      return key && key.trim() && m !== afterModel;
+    });
   }
 
   /** Rough chars-per-token ratio (≈ 3.5 for English code). */
@@ -220,9 +291,15 @@ export class GroqClient {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private getConfig() {
+  private getConfig(overrideModelId?: string) {
     const config = vscode.workspace.getConfiguration('prompt2code');
-    const model = this._modelOverride ?? config.get<string>('model', 'llama-3.3-70b-versatile');
+    let model = overrideModelId ?? this._modelOverride ?? config.get<string>('model', 'llama-3.3-70b-versatile');
+
+    // Resolve 'auto' to the best available model
+    if (model === GroqClient.AUTO_MODEL_ID) {
+      model = this.resolveAutoModel();
+    }
+
     const provider = GroqClient.getProviderForModel(model);
 
     // Resolve API key: per-model key > global fallback key
@@ -332,7 +409,80 @@ export class GroqClient {
     messages: GroqMessage[],
     options?: { maxTokens?: number; temperature?: number }
   ): Promise<GroqCompletionResult> {
-    const config = this.getConfig();
+    // In Auto mode, try the resolved model first, then fallback to others
+    if (this.isAutoMode()) {
+      return this.requestWithAutoFallback(messages, options);
+    }
+    return this._requestCompletionForModel(messages, options);
+  }
+
+  /**
+   * Auto-fallback: try the primary model, and on failure try remaining
+   * models in the fallback chain that have API keys configured.
+   */
+  private async requestWithAutoFallback(
+    messages: GroqMessage[],
+    options?: { maxTokens?: number; temperature?: number }
+  ): Promise<GroqCompletionResult> {
+    const primaryModel = this.resolveAutoModel();
+    const fallbacks = this.getFallbackModels(primaryModel);
+    const modelsToTry = [primaryModel, ...fallbacks];
+
+    let lastError: Error | null = null;
+
+    for (const modelId of modelsToTry) {
+      try {
+        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
+        console.log(`🤖 Auto mode: trying ${modelLabel} (${modelId})`);
+
+        const result = await this._requestCompletionForModel(messages, options, modelId);
+        this._lastResolvedModel = modelId;
+        console.log(`✅ Auto mode: success with ${modelLabel}`);
+        return result;
+      } catch (err: any) {
+        lastError = err;
+        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
+        const status = err?.response?.status;
+        const isRetriable = this.isRetriableForFallback(err);
+
+        console.warn(`⚠️ Auto mode: ${modelLabel} failed (${status || err.message}). Retriable: ${isRetriable}`);
+
+        // Only fallback on retriable errors (rate limit, server error, model overloaded, etc.)
+        // Auth errors (401/403) for a specific model are retriable because another model may work
+        if (!isRetriable) {
+          throw err; // Non-retriable error (e.g. user cancellation) — don't try more models
+        }
+        // Continue to next model
+      }
+    }
+
+    // All models failed
+    throw lastError ?? new Error('All models in Auto fallback chain failed.');
+  }
+
+  /** Determine if an error should trigger a fallback to the next model. */
+  private isRetriableForFallback(err: any): boolean {
+    if (!err) { return false; }
+    const status = err?.response?.status;
+    // Rate limit, server errors, overloaded, bad gateway, timeout, auth issues on specific models
+    if (status && [401, 402, 403, 429, 500, 502, 503, 504].includes(status)) { return true; }
+    // Network errors
+    const code = err?.code;
+    if (['ENOTFOUND', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED'].includes(code)) { return true; }
+    // Empty response
+    if (err.message?.includes('empty response')) { return true; }
+    // Model not found
+    if (status === 404) { return true; }
+    return false;
+  }
+
+  /** Core completion logic for a specific model (or the current active model). */
+  private async _requestCompletionForModel(
+    messages: GroqMessage[],
+    options?: { maxTokens?: number; temperature?: number },
+    overrideModelId?: string
+  ): Promise<GroqCompletionResult> {
+    const config = this.getConfig(overrideModelId);
     const maxTokens = options?.maxTokens ?? config.maxTokens;
     const temperature = options?.temperature ?? config.temperature;
 
@@ -927,6 +1077,57 @@ export class GroqClient {
     onChunk: (accumulated: string) => void,
     extraContext?: string
   ): Promise<string> {
+    // Auto-mode: try with fallback
+    if (this.isAutoMode()) {
+      return this._generateSectionEditWithFallback(instruction, language, selectedCode, surroundingContext, onChunk, extraContext);
+    }
+    return this._generateSectionEditCore(instruction, language, selectedCode, surroundingContext, onChunk, extraContext);
+  }
+
+  /** Auto-fallback wrapper for section edit. */
+  private async _generateSectionEditWithFallback(
+    instruction: string,
+    language: string,
+    selectedCode: string,
+    surroundingContext: string,
+    onChunk: (accumulated: string) => void,
+    extraContext?: string
+  ): Promise<string> {
+    const primaryModel = this.resolveAutoModel();
+    const fallbacks = this.getFallbackModels(primaryModel);
+    const modelsToTry = [primaryModel, ...fallbacks];
+    let lastError: Error | null = null;
+
+    for (const modelId of modelsToTry) {
+      try {
+        console.log(`🤖 Auto section-edit: trying ${modelId}`);
+        const savedOverride = this._modelOverride;
+        this._modelOverride = modelId;
+        try {
+          const result = await this._generateSectionEditCore(instruction, language, selectedCode, surroundingContext, onChunk, extraContext);
+          this._lastResolvedModel = modelId;
+          return result;
+        } finally {
+          this._modelOverride = savedOverride;
+        }
+      } catch (err: any) {
+        lastError = err;
+        if (!this.isRetriableForFallback(err)) { throw err; }
+        console.warn(`⚠️ Auto section-edit: ${modelId} failed, trying next...`);
+      }
+    }
+    throw lastError ?? new Error('All models failed in Auto section-edit fallback.');
+  }
+
+  /** Core section edit logic. */
+  private async _generateSectionEditCore(
+    instruction: string,
+    language: string,
+    selectedCode: string,
+    surroundingContext: string,
+    onChunk: (accumulated: string) => void,
+    extraContext?: string
+  ): Promise<string> {
     const config = this.getConfig();
 
     if (!config.apiKey) {
@@ -1076,6 +1277,58 @@ export class GroqClient {
    *   generation or chat-only mode.
    */
   async generateCodeStreaming(
+    instruction: string,
+    language: string,
+    onChunk: (accumulated: string) => void,
+    context?: string,
+    currentFileContent?: string
+  ): Promise<string> {
+    // Auto-mode: try with fallback
+    if (this.isAutoMode()) {
+      return this._generateCodeStreamingWithFallback(instruction, language, onChunk, context, currentFileContent);
+    }
+    return this._generateCodeStreamingCore(instruction, language, onChunk, context, currentFileContent);
+  }
+
+  /** Auto-fallback wrapper for streaming code generation. */
+  private async _generateCodeStreamingWithFallback(
+    instruction: string,
+    language: string,
+    onChunk: (accumulated: string) => void,
+    context?: string,
+    currentFileContent?: string
+  ): Promise<string> {
+    const primaryModel = this.resolveAutoModel();
+    const fallbacks = this.getFallbackModels(primaryModel);
+    const modelsToTry = [primaryModel, ...fallbacks];
+    let lastError: Error | null = null;
+
+    for (const modelId of modelsToTry) {
+      try {
+        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
+        console.log(`🤖 Auto stream: trying ${modelLabel}`);
+
+        // Temporarily set override to this model
+        const savedOverride = this._modelOverride;
+        this._modelOverride = modelId;
+        try {
+          const result = await this._generateCodeStreamingCore(instruction, language, onChunk, context, currentFileContent);
+          this._lastResolvedModel = modelId;
+          return result;
+        } finally {
+          this._modelOverride = savedOverride;
+        }
+      } catch (err: any) {
+        lastError = err;
+        if (!this.isRetriableForFallback(err)) { throw err; }
+        console.warn(`⚠️ Auto stream: ${modelId} failed, trying next...`);
+      }
+    }
+    throw lastError ?? new Error('All models failed in Auto streaming fallback.');
+  }
+
+  /** Core streaming code generation logic. */
+  private async _generateCodeStreamingCore(
     instruction: string,
     language: string,
     onChunk: (accumulated: string) => void,

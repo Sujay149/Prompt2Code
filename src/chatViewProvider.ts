@@ -387,15 +387,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ...m,
       hasKey: !!(this.groqClient.getApiKeyForModel(m.id)?.trim()),
     }));
+    // Count how many models have keys set (for Auto label)
+    const keysConfigured = modelsWithKeyStatus.filter(m => m.hasKey).length;
     this._view.webview.postMessage({
       type: 'modelList',
       models: modelsWithKeyStatus,
       activeModel,
+      autoModelId: GroqClient.AUTO_MODEL_ID,
+      keysConfigured,
     });
   }
 
   /** Handle model selection from the webview dropdown. */
   private async handleModelSelection(modelId: string) {
+    // Auto mode — no API key needed, just set the override
+    if (modelId === GroqClient.AUTO_MODEL_ID) {
+      this.groqClient.setModelOverride(modelId);
+      await vscode.workspace.getConfiguration('prompt2code').update('model', modelId, vscode.ConfigurationTarget.Global);
+      this._view?.webview.postMessage({
+        type: 'modelChangeResult',
+        success: true,
+        activeModel: modelId,
+      });
+      vscode.window.showInformationMessage('Model switched to Auto (automatic fallback)');
+      return;
+    }
+
     const modelInfo = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId);
     const modelLabel = modelInfo?.label ?? modelId;
     const provider = GroqClient.getProviderForModel(modelId);
@@ -633,16 +650,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // ASK MODE — Chat only, no file edits
   // ===========================
 
+  /** Notify the webview which model was actually used (useful in Auto mode). */
+  private notifyResolvedModel() {
+    if (!this.groqClient.isAutoMode()) { return; }
+    const resolvedId = this.groqClient.getLastResolvedModel();
+    if (!resolvedId) { return; }
+    const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === resolvedId)?.label ?? resolvedId;
+    this._view?.webview.postMessage({
+      type: 'autoModelResolved',
+      modelId: resolvedId,
+      modelLabel,
+    });
+  }
+
   private async handleAskMode(message: string, attachedFiles: string[] = []) {
     this._view?.webview.postMessage({ type: 'loading', isLoading: true });
 
     try {
       const activeModel = this.groqClient.getActiveModel();
-      const apiKey = this.groqClient.getApiKeyForModel(activeModel);
-      if (!apiKey || apiKey.trim() === '') {
-        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
-        const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
-        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
+      // In Auto mode, skip single-model key check — fallback handles it
+      if (activeModel !== GroqClient.AUTO_MODEL_ID) {
+        const apiKey = this.groqClient.getApiKeyForModel(activeModel);
+        if (!apiKey || apiKey.trim() === '') {
+          const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
+          const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
+          throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
+        }
       }
 
       const fileRefs = extractFileReferences(message);
@@ -723,6 +756,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       this.conversationHistory.push({ role: 'assistant', content: response });
       this._view?.webview.postMessage({ type: 'assistantMessage', message: response });
+      this.notifyResolvedModel();
 
     } catch (err: any) {
       console.error('❌ Ask mode error:', err);
@@ -744,11 +778,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       const activeModel = this.groqClient.getActiveModel();
-      const apiKey = this.groqClient.getApiKeyForModel(activeModel);
-      if (!apiKey || apiKey.trim() === '') {
-        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
-        const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
-        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
+      if (activeModel !== GroqClient.AUTO_MODEL_ID) {
+        const apiKey = this.groqClient.getApiKeyForModel(activeModel);
+        if (!apiKey || apiKey.trim() === '') {
+          const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
+          const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
+          throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
+        }
       }
 
       const fileRefs = extractFileReferences(message);
@@ -839,6 +875,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         message: response,
         originalRequest: cleanMessage,
       });
+      this.notifyResolvedModel();
 
     } catch (err: any) {
       console.error('❌ Plan mode error:', err);
@@ -877,13 +914,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       // ⚠️ CHECK API KEY FIRST — resolves per-model key or global fallback
       const activeModel = this.groqClient.getActiveModel();
-      const apiKey = this.groqClient.getApiKeyForModel(activeModel);
-      console.log('🔑 API Key for', activeModel, ':', apiKey ? 'YES' : 'NO');
+      if (activeModel !== GroqClient.AUTO_MODEL_ID) {
+        const apiKey = this.groqClient.getApiKeyForModel(activeModel);
+        console.log('🔑 API Key for', activeModel, ':', apiKey ? 'YES' : 'NO');
 
-      if (!apiKey || apiKey.trim() === '') {
-        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
-        const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
-        throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
+        if (!apiKey || apiKey.trim() === '') {
+          const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === activeModel)?.label ?? activeModel;
+          const provMeta = GroqClient.getProviderMeta(GroqClient.getProviderForModel(activeModel));
+          throw new Error(`⚠️ No API key for ${modelLabel}. Select the model from the dropdown to set its key.\n\nGet your ${provMeta.name} API key at: ${provMeta.apiKeyUrl}`);
+        }
       }
 
       // ── Resolve @file / #file: references ──
@@ -1184,6 +1223,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.conversationHistory.push({ role: 'assistant', content: response });
 
       this._view?.webview.postMessage({ type: 'assistantMessage', message: response });
+      this.notifyResolvedModel();
 
     } catch (err: any) {
       console.error('❌ Error:', err);
@@ -1933,6 +1973,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         this._view?.webview.postMessage({ type: 'assistantMessage', message: summary });
         this.conversationHistory.push({ role: 'assistant', content: summary });
+        this.notifyResolvedModel();
         vscode.window.showInformationMessage(`Prompt2Code: Generated ${created.length} files from image`);
       } else {
         // Single file output — insert into editor or show as chat
@@ -3014,6 +3055,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     background: rgba(136,136,136,0.15); color: #999;
   }
 
+  /* Auto model picker item */
+  .picker-item.picker-auto {
+    border-bottom: none;
+    background: linear-gradient(135deg, rgba(255,200,50,0.06), rgba(255,150,50,0.04));
+  }
+  .picker-item.picker-auto:hover {
+    background: linear-gradient(135deg, rgba(255,200,50,0.12), rgba(255,150,50,0.08));
+  }
+  .picker-item.picker-auto.selected {
+    background: linear-gradient(135deg, rgba(255,200,50,0.15), rgba(255,150,50,0.10));
+  }
+
+  /* Auto model resolved tag */
+  .auto-model-tag {
+    font-size: 10.5px; color: var(--vscode-descriptionForeground, #888);
+    padding: 3px 0 0; margin-top: 4px;
+    display: flex; align-items: center; gap: 4px;
+    opacity: 0.7;
+  }
+  .auto-model-tag strong {
+    color: var(--vscode-foreground);
+    font-weight: 600;
+  }
+
   /* Plan actions */
   .plan-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
   .plan-actions button { padding: 5px 14px; font-size: 12px; border-radius: 4px; cursor: pointer; border: none; }
@@ -3923,8 +3988,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (msg.type === 'modelList') {
       availableModels = msg.models || [];
+      const autoId = msg.autoModelId || 'auto';
+      const isAutoActive = msg.activeModel === autoId;
+
       if (modelSelect) {
         modelSelect.innerHTML = '';
+        // Auto option at the top
+        const autoOpt = document.createElement('option');
+        autoOpt.value = autoId;
+        autoOpt.textContent = '⚡ Auto (best available)';
+        if (isAutoActive) { autoOpt.selected = true; }
+        modelSelect.appendChild(autoOpt);
         // Group by key status in <optgroup>
         const withKey = availableModels.filter(m => m.hasKey);
         const noKey = availableModels.filter(m => !m.hasKey);
@@ -3956,12 +4030,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // Update model label button
       const modelLabelEl = document.getElementById('modelLabel');
       if (modelLabelEl) {
-        const active = availableModels.find(m => m.id === msg.activeModel);
-        if (active) modelLabelEl.textContent = active.label;
+        if (isAutoActive) {
+          modelLabelEl.textContent = 'Auto';
+        } else {
+          const active = availableModels.find(m => m.id === msg.activeModel);
+          if (active) modelLabelEl.textContent = active.label;
+        }
       }
-      // Populate model picker — grouped by API key status
+      // Populate model picker — Auto at top, then grouped by API key status
       if (modelPicker) {
         modelPicker.innerHTML = '';
+
+        // ── Auto option ──
+        const autoBtn = document.createElement('button');
+        autoBtn.className = 'picker-item picker-auto' + (isAutoActive ? ' selected' : '');
+        autoBtn.setAttribute('data-model-id', autoId);
+        autoBtn.innerHTML =
+          '<span class="picker-check">' + (isAutoActive ? '\u2713' : '') + '</span>' +
+          '<span style="font-weight:600">\u26A1 Auto</span> <span style="opacity:0.45;font-size:10px">(best available with fallback)</span>';
+        autoBtn.onclick = () => {
+          modelPicker.classList.remove('open');
+          vscode.postMessage({ type: 'selectModel', modelId: autoId });
+        };
+        modelPicker.appendChild(autoBtn);
+
+        const autoDivider = document.createElement('div');
+        autoDivider.className = 'picker-divider';
+        modelPicker.appendChild(autoDivider);
+
         const withKey = availableModels.filter(m => m.hasKey);
         const noKey = availableModels.filter(m => !m.hasKey);
         if (withKey.length > 0) {
@@ -4014,11 +4110,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (modelSelect) modelSelect.value = msg.activeModel;
         const modelLabelEl = document.getElementById('modelLabel');
         if (modelLabelEl) {
-          const active = availableModels.find(m => m.id === msg.activeModel);
-          if (active) {
-            modelLabelEl.textContent = active.label;
-            // When a key is now set for this model, update hasKey flag
-            active.hasKey = true;
+          if (msg.activeModel === 'auto') {
+            modelLabelEl.textContent = 'Auto';
+          } else {
+            const active = availableModels.find(m => m.id === msg.activeModel);
+            if (active) {
+              modelLabelEl.textContent = active.label;
+              // When a key is now set for this model, update hasKey flag
+              active.hasKey = true;
+            }
           }
         }
         // Update picker checkmarks using data-model-id attribute
@@ -4041,6 +4141,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (msg.type === 'apiKeysState') {
       renderModelKeyList(msg.keys, msg.activeModel);
+    }
+    if (msg.type === 'autoModelResolved') {
+      // Show a subtle note below the last assistant message about which model was used
+      const msgs = chat.querySelectorAll('.msg.assistant');
+      const last = msgs[msgs.length - 1];
+      if (last && !last.querySelector('.auto-model-tag')) {
+        const tag = document.createElement('div');
+        tag.className = 'auto-model-tag';
+        tag.innerHTML = '\u26A1 <span>Auto</span> used <strong>' + escapeHtml(msg.modelLabel) + '</strong>';
+        last.appendChild(tag);
+      }
+      // Update the model label to show which model was resolved
+      const modelLabelEl = document.getElementById('modelLabel');
+      if (modelLabelEl && modelLabelEl.textContent === 'Auto') {
+        modelLabelEl.textContent = 'Auto';
+      }
     }
     if (msg.type === 'apiKeyResult') {
       showSettingsMsg(msg.success ? '✓ ' + msg.message : '✕ ' + msg.message, msg.success ? 'ok' : 'err');
