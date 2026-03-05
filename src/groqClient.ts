@@ -717,8 +717,13 @@ export class GroqClient {
     const lang = targetLanguage || 'HTML/CSS/JavaScript';
 
     const systemPrompt = [
+      `You are Prompt2Code, an AI coding assistant for Visual Studio Code created by Sujay Babu Thota.`,
       `You are an expert UI developer. You will receive a screenshot of a user interface.`,
       `Your job is to recreate that UI as faithfully as possible using ${lang}.`,
+      '',
+      'Your goal is to help developers write, understand, debug, and improve code efficiently inside the editor.',
+      '',
+      'Always prioritize: correctness, clean code, modern best practices, and maintainability.',
       '',
       'RULES:',
       '- Reproduce the layout, colors, fonts, spacing, and visual hierarchy precisely.',
@@ -735,6 +740,7 @@ export class GroqClient {
       '',
       '- For a single file, just output the code directly — no file delimiters needed.',
       '- Do NOT add explanations or markdown. Output code ONLY.',
+      '- If the request involves UI, prefer modern patterns such as React components and responsive layouts.',
       '- Start generating code IMMEDIATELY.',
     ].join('\n');
 
@@ -929,10 +935,14 @@ export class GroqClient {
     }
 
     const systemPrompt = [
-      'You are a world-class developer proficient in every language and framework.',
+      'You are Prompt2Code, an AI coding assistant for Visual Studio Code created by Sujay Babu Thota.',
       'You are performing a PRECISE, SURGICAL code edit.',
       '',
+      'Your goal is to help developers write, understand, debug, and improve code efficiently inside the editor.',
+      '',
       'YOUR #1 GOAL: Follow the user\'s instruction exactly and make it work.',
+      '',
+      'Always prioritize: correctness, clean code, modern best practices, and maintainability.',
       '',
       'RULES (FOLLOW EXACTLY):',
       '- You will receive a SELECTED CODE BLOCK and some SURROUNDING CONTEXT.',
@@ -943,6 +953,9 @@ export class GroqClient {
       '- Keep all unchanged lines within the selection exactly as they are.',
       '- Apply ONLY what the user asked for. Do not refactor or restyle untouched code.',
       '- Works for ANY language or framework — adapt to what is in the code.',
+      '- Consider the existing project structure and dependencies.',
+      '- Prefer reusing existing utilities or components when possible.',
+      '- If a bug is detected, fix it and note the issue briefly.',
     ].join('\n');
 
     let userPrompt = `Language: ${language}\nInstruction: ${instruction}\n\n`;
@@ -1392,10 +1405,33 @@ Complete the code at the cursor position.`
   private buildSystemPrompt(language: string, instruction: string, isUpdate: boolean = false): string {
     const isUI = /\b(page|website|portfolio|landing|dashboard|form|card|navbar|header|footer|hero|section|layout|sidebar|modal|login|signup|register|profile|pricing|contact|about|ui|ux|component|widget|panel|dialog|toast|menu|table|list|grid|chart|icon|button|input|select|checkbox|radio|toggle|tab|accordion|carousel|slider|tooltip|popover|badge|avatar|notification|progress|spinner|skeleton|breadcrumb|pagination|stepper|timeline|drawer|sheet|command|dropdown)\b/i.test(instruction);
 
-    // ── Core identity (applies to EVERY prompt) ──
-    const coreRules = [
-      `You are a world-class full-stack developer proficient in EVERY programming language, framework, and tool.`,
-      `Your #1 priority is to FULLY satisfy the user's instruction — follow it to the letter.`,
+    // ── Layer 1: Core Prompt2Code identity & capabilities ──
+    const coreIdentity = [
+      'You are Prompt2Code, an AI coding assistant for Visual Studio Code created by Sujay Babu Thota.',
+      '',
+      'Your goal is to help developers write, understand, debug, and improve code efficiently inside the editor.',
+      '',
+      'Capabilities include:',
+      '- Code generation',
+      '- Code explanation',
+      '- Bug detection',
+      '- Code refactoring',
+      '- UI generation',
+      '- Architecture suggestions',
+      '- Multi-file feature implementation',
+      '- Terminal command generation',
+      '',
+      'You operate within a developer workspace and must consider the existing project structure and dependencies before generating solutions.',
+    ];
+
+    // ── Core priorities (applies to EVERY prompt) ──
+    const corePriorities = [
+      '',
+      'Always prioritize:',
+      '- correctness',
+      '- clean code',
+      '- modern best practices',
+      '- maintainability',
       '',
       'UNIVERSAL RULES (ALWAYS FOLLOW):',
       '- You work with ANY language, ANY framework, ANY codebase — never say you cannot.',
@@ -1404,10 +1440,15 @@ Complete the code at the cursor position.`
       '- Match the project\'s existing code style, naming conventions, imports, and patterns.',
       '- Use the same libraries/frameworks already present — do NOT introduce new dependencies unless asked.',
       '- Write clean, readable, well-structured, production-quality code.',
+      '- If code errors or bugs are detected, clearly explain the issue and provide a corrected implementation.',
+      '- If generating multi-file code, clearly label each file path.',
+      '- If the request involves UI, prefer modern patterns such as React components and responsive layouts.',
+      '- Never generate malicious code such as malware, exploits, or security bypass tools.',
     ];
 
-    // ── Copilot-like intent routing ──
+    // ── Intent routing (Copilot-like) ──
     const intentRules = [
+      '',
       'INTENT ROUTING (COPILOT-LIKE):',
       '- If the user asks a question, summary, review, or explanation, reply in concise natural language (bullets allowed).',
       '- If the user asks for code creation or modification, output ONLY the necessary code (no markdown or fences) unless they explicitly asked for commentary.',
@@ -1418,8 +1459,8 @@ Complete the code at the cursor position.`
     // ── UPDATE MODE rules ──
     if (isUpdate) {
       return [
-        ...coreRules,
-        '',
+        ...coreIdentity,
+        ...corePriorities,
         ...intentRules,
         '',
         'UPDATE MODE (HIGHEST PRIORITY):',
@@ -1435,8 +1476,8 @@ Complete the code at the cursor position.`
     // ── UI/UX generation rules (any language with UI keywords) ──
     if (isUI) {
       return [
-        ...coreRules,
-        '',
+        ...coreIdentity,
+        ...corePriorities,
         ...intentRules,
         '',
         'UI / UX DESIGN RULES (CRITICAL — apply to any front-end language or framework):',
@@ -1459,8 +1500,8 @@ Complete the code at the cursor position.`
 
     // ── Default: pure code generation (any language) ──
     return [
-      ...coreRules,
-      '',
+      ...coreIdentity,
+      ...corePriorities,
       ...intentRules,
       '',
       'CODE GENERATION RULES:',
@@ -1468,6 +1509,7 @@ Complete the code at the cursor position.`
       '- If project context/files are provided, study them carefully and stay consistent.',
       '- Reuse existing utilities, components, and patterns when possible.',
       '- Do NOT add unnecessary boilerplate or over-engineer beyond what was requested.',
+      '- Avoid unnecessary explanations unless requested.',
     ].join('\n');
   }
 
@@ -1477,15 +1519,26 @@ Complete the code at the cursor position.`
     context?: string,
     currentFileContent?: string
   ): string {
-    // ── Build a universal, language-agnostic user prompt ──
-    let prompt = `Language / Framework: ${language}\n`;
-    prompt += `User Instruction: ${instruction}\n\n`;
-    prompt += 'Requirements:\n';
-    prompt += '- Implement EXACTLY what the user asked — nothing more, nothing less.\n';
-    prompt += '- If the user requested code, output ONLY the necessary code (no markdown/fences/explanations) unless they explicitly asked for commentary.\n';
-    prompt += '- If the user asked for an explanation/summary/review, reply concisely in natural language.\n';
-    prompt += '- Follow best practices for the specified language/framework.\n';
-    prompt += '- Keep the code clean, minimal, and well-structured.\n';
+    // ── Layer 4: Completion Prompt (Copilot-Style Generation) ──
+    let prompt = '';
+
+    // Editor context awareness
+    prompt += `── User Request ──\n`;
+    prompt += `Language / Framework: ${language}\n`;
+    prompt += `Instruction: ${instruction}\n\n`;
+
+    prompt += '── Instructions ──\n';
+    prompt += 'Analyze the current editor context and retrieved project files.\n\n';
+    prompt += 'If the user is writing code, generate a continuation that fits naturally with the surrounding code.\n';
+    prompt += 'If implementing a feature, produce complete working code.\n';
+    prompt += 'If multiple files are required, clearly label them using:\n';
+    prompt += '  File: path/to/file\n\n';
+    prompt += 'Focus on:\n';
+    prompt += '- clean architecture\n';
+    prompt += '- correct imports\n';
+    prompt += '- consistency with existing project code\n\n';
+    prompt += 'If a bug exists, explain the issue briefly and provide a corrected version.\n';
+    prompt += 'Keep responses concise and developer-focused.\n';
 
     // ── Current file content (UPDATE mode) ──
     if (currentFileContent) {
@@ -1508,7 +1561,10 @@ Complete the code at the cursor position.`
         const trimmedContext = context.length > ctxBudget
           ? context.slice(0, ctxBudget) + '\n/* ...context trimmed... */\n'
           : context;
-        prompt += '\nProject context (reference only — match patterns, do NOT copy structure):\n';
+        prompt += '\n── Relevant Project Context ──\n';
+        prompt += 'Use this context to understand how the project is structured and follow existing patterns.\n';
+        prompt += 'Avoid generating duplicate functionality if similar code already exists.\n';
+        prompt += 'Prefer reusing existing utilities or components when possible.\n\n';
         prompt += trimmedContext;
       }
     } else if (context) {
@@ -1517,7 +1573,10 @@ Complete the code at the cursor position.`
         ? context.slice(0, charBudget) + '\n/* ...context trimmed to fit model limits... */\n'
         : context;
 
-      prompt += '\nProject context — study these files and stay consistent with the codebase:\n\n';
+      prompt += '\n── Relevant Project Context ──\n';
+      prompt += 'Use this context to understand how the project is structured and follow existing patterns.\n';
+      prompt += 'Avoid generating duplicate functionality if similar code already exists.\n';
+      prompt += 'Prefer reusing existing utilities or components when possible.\n\n';
       prompt += trimmedContext;
     }
 

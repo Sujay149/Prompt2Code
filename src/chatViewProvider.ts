@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { GroqClient, GroqMessage } from './groqClient';
 import { GoogleAuthProvider } from './authProvider';
+import { PromptBuilder } from './promptBuilder';
 import {
   listWorkspaceFiles,
   createWorkspaceFile,
@@ -26,6 +27,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private _view?: vscode.WebviewView;
   private groqClient: GroqClient;
+  private promptBuilder: PromptBuilder;
   private conversationHistory: GroqMessage[] = [];
   private lastTextEditor?: vscode.TextEditor;
   private disposables: vscode.Disposable[] = [];
@@ -40,6 +42,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   constructor(private readonly _extensionUri: vscode.Uri) {
     this.groqClient = new GroqClient();
+    this.promptBuilder = new PromptBuilder();
   }
 
   /** Called from extension.ts after construction. */
@@ -656,23 +659,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const languageId = doc?.languageId ?? 'plaintext';
 
       let contextInfo = '';
+
+      // ── Layer 2: Editor Context ──
       if (doc) {
-        contextInfo = `\n\nCurrent file: ${doc.fileName} (${languageId})`;
-        // Include current file content for ask mode so AI can answer about it
-        const fileContent = doc.getText();
-        if (fileContent.length < 15000) {
-          contextInfo += `\n\nFile content:\n${fileContent}`;
-        } else {
-          contextInfo += `\n\nFile content (first 15000 chars):\n${fileContent.substring(0, 15000)}\n/* ...truncated... */`;
+        const editorCtx = this.promptBuilder.captureEditorContext(editor);
+        if (editorCtx) {
+          contextInfo = '\n\n' + this.promptBuilder.buildEditorContextPrompt(editorCtx, 15000);
         }
       }
+
+      // ── Layer 3: Codebase Retrieval (RAG) ──
       if (referencedFilesContext) {
-        contextInfo += `\n\nReferenced files:\n${referencedFilesContext}`;
+        contextInfo += `\n\n── Referenced Files ──\n${referencedFilesContext}`;
       }
 
       if (/(@workspace|project structure|codebase|all files)/i.test(message)) {
         const tree = await buildProjectTree();
-        contextInfo += `\n\nProject files:\n${tree}`;
+        contextInfo += `\n\n── Project Structure ──\n${tree}`;
       }
 
       const chatCharBudget = this.groqClient.getContextCharBudget();
@@ -683,21 +686,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         maxFiles: 5,
       });
       if (projCtx.text) {
-        contextInfo += `\n\nProject context (${projCtx.fileCount} files):\n${projCtx.text}`;
+        contextInfo += `\n\n── Relevant Project Context (${projCtx.fileCount} files) ──\n${projCtx.text}`;
+        contextInfo += '\n\nUse this context to understand how the project is structured and follow existing patterns.';
       }
 
       const messages: GroqMessage[] = [
         {
           role: 'system',
           content:
-            'You are a helpful coding assistant in ASK mode. Your job is to EXPLAIN, ANSWER QUESTIONS, and provide GUIDANCE about code.\n\n' +
+            'You are Prompt2Code, an AI coding assistant for Visual Studio Code created by Sujay Babu Thota.\n\n' +
+            'You are in ASK mode. Your job is to EXPLAIN, ANSWER QUESTIONS, and provide GUIDANCE about code.\n\n' +
+            'Your goal is to help developers understand, debug, and improve code efficiently inside the editor.\n\n' +
+            'Capabilities include:\n' +
+            '- Code explanation\n' +
+            '- Bug detection\n' +
+            '- Architecture suggestions\n' +
+            '- Best practice guidance\n\n' +
+            'Always prioritize: correctness, clarity, and modern best practices.\n\n' +
             'RULES:\n' +
             '- Do NOT output full code rewrites or file contents.\n' +
             '- Provide clear, concise explanations with code snippets only when helpful.\n' +
             '- If the user asks you to change/edit/create code, remind them to switch to Agent mode.\n' +
             '- Use minimal markdown. Keep responses focused and readable.\n' +
             '- Mirror the user\'s tone; keep greetings short (e.g., "Hi! How can I help?").\n' +
-            '- Reference specific line numbers and function names when explaining code.'
+            '- Reference specific line numbers and function names when explaining code.\n' +
+            '- If code errors or bugs are detected, clearly explain the issue and provide a corrected implementation.\n' +
+            '- Consider the existing project structure and dependencies before providing guidance.'
         },
         ...this.conversationHistory.slice(0, -1),
         { role: 'user', content: cleanMessage + contextInfo }
@@ -750,23 +764,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const doc = editor?.document;
 
       let contextInfo = '';
+
+      // ── Layer 2: Editor Context ──
       if (doc) {
-        contextInfo = `\n\nCurrent file: ${doc.fileName} (${doc.languageId})\nLines: ${doc.lineCount}`;
-        // Include file structure summary
-        const fileContent = doc.getText();
-        if (fileContent.length < 20000) {
-          contextInfo += `\n\nFile content:\n${fileContent}`;
-        } else {
-          contextInfo += `\n\nFile content (first 20000 chars):\n${fileContent.substring(0, 20000)}\n/* ...truncated... */`;
+        const editorCtx = this.promptBuilder.captureEditorContext(editor);
+        if (editorCtx) {
+          contextInfo = '\n\n' + this.promptBuilder.buildEditorContextPrompt(editorCtx, 20000);
         }
       }
+
+      // ── Layer 3: Codebase Retrieval (RAG) ──
       if (referencedFilesContext) {
-        contextInfo += `\n\nReferenced files:\n${referencedFilesContext}`;
+        contextInfo += `\n\n── Referenced Files ──\n${referencedFilesContext}`;
       }
 
       // Always include project tree for planning
       const tree = await buildProjectTree();
-      contextInfo += `\n\nProject structure:\n${tree}`;
+      contextInfo += `\n\n── Project Structure ──\n${tree}`;
 
       const chatCharBudget = this.groqClient.getContextCharBudget();
       const projCtx = await gatherProjectContext({
@@ -776,14 +790,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         maxFiles: 8,
       });
       if (projCtx.text) {
-        contextInfo += `\n\nProject context (${projCtx.fileCount} files):\n${projCtx.text}`;
+        contextInfo += `\n\n── Relevant Project Context (${projCtx.fileCount} files) ──\n${projCtx.text}`;
+        contextInfo += '\n\nUse this context to understand how the project is structured and follow existing patterns.';
+        contextInfo += '\nAvoid generating duplicate functionality if similar code already exists.';
+        contextInfo += '\nPrefer reusing existing utilities or components when possible.';
       }
 
       const messages: GroqMessage[] = [
         {
           role: 'system',
           content:
-            'You are an expert coding assistant in PLAN mode. Your job is to analyze the request and produce a clear, actionable IMPLEMENTATION PLAN.\n\n' +
+            'You are Prompt2Code, an AI coding assistant for Visual Studio Code created by Sujay Babu Thota.\n\n' +
+            'You are in PLAN mode. Your job is to analyze the request and produce a clear, actionable IMPLEMENTATION PLAN.\n\n' +
+            'You operate within a developer workspace and must consider the existing project structure and dependencies before planning solutions.\n\n' +
+            'Always prioritize: correctness, clean code, modern best practices, and maintainability.\n\n' +
             'FORMAT YOUR PLAN EXACTLY LIKE THIS:\n' +
             '## Plan: [brief title]\n\n' +
             '### Steps:\n' +
@@ -799,7 +819,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             '- Include estimated scope (e.g., "~20 lines", "new file").\n' +
             '- Mention potential risks or things to watch out for.\n' +
             '- Do NOT generate code in plan mode — only describe what to do.\n' +
-            '- Keep it concise but thorough. Max 10 steps for most tasks.'
+            '- Keep it concise but thorough. Max 10 steps for most tasks.\n' +
+            '- Prefer reusing existing utilities or components when possible.\n' +
+            '- Avoid generating duplicate functionality if similar code already exists.'
         },
         ...this.conversationHistory.slice(0, -1),
         { role: 'user', content: cleanMessage + contextInfo }
@@ -1100,18 +1122,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       // ── Chat / explanation mode ──
       let contextInfo = '';
+
+      // ── Layer 2: Editor Context ──
       if (doc) {
-        contextInfo = `\n\nCurrent file: ${doc.fileName} (${languageId})`;
+        const editorCtx = this.promptBuilder.captureEditorContext(editor);
+        if (editorCtx) {
+          contextInfo = '\n\n' + this.promptBuilder.buildEditorContextPrompt(editorCtx, 15000);
+        }
       }
+
+      // ── Layer 3: Codebase Retrieval (RAG) ──
       if (referencedFilesContext) {
-        contextInfo += `\n\nReferenced files:\n${referencedFilesContext}`;
+        contextInfo += `\n\n── Referenced Files ──\n${referencedFilesContext}`;
       }
 
       // If user typed @workspace or the message asks about the project structure,
       // attach a compact project tree.
       if (/(@workspace|project structure|codebase|all files)/i.test(message)) {
         const tree = await buildProjectTree();
-        contextInfo += `\n\nProject files:\n${tree}`;
+        contextInfo += `\n\n── Project Structure ──\n${tree}`;
       }
 
       // Always include some project context so the AI understands the codebase
@@ -1123,14 +1152,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         maxFiles: 5,
       });
       if (projCtx.text) {
-        contextInfo += `\n\nProject context (${projCtx.fileCount} files):\n${projCtx.text}`;
+        contextInfo += `\n\n── Relevant Project Context (${projCtx.fileCount} files) ──\n${projCtx.text}`;
+        contextInfo += '\n\nUse this context to understand how the project is structured and follow existing patterns.';
+        contextInfo += '\nAvoid generating duplicate functionality if similar code already exists.';
+        contextInfo += '\nPrefer reusing existing utilities or components when possible.';
       }
 
       const messages: GroqMessage[] = [
         {
           role: 'system',
           content:
-            'You are a helpful coding assistant. Explain clearly. Use minimal markdown. Avoid fenced code blocks.'
+            'You are Prompt2Code, an AI coding assistant for Visual Studio Code created by Sujay Babu Thota.\n\n' +
+            'Your goal is to help developers write, understand, debug, and improve code efficiently inside the editor.\n\n' +
+            'Capabilities include: code generation, code explanation, bug detection, code refactoring, UI generation, architecture suggestions, multi-file feature implementation, and terminal command generation.\n\n' +
+            'You operate within a developer workspace and must consider the existing project structure and dependencies before generating solutions.\n\n' +
+            'Always prioritize: correctness, clean code, modern best practices, and maintainability.\n\n' +
+            'Avoid unnecessary explanations unless requested. Use minimal markdown. Avoid fenced code blocks.\n\n' +
+            'If code errors or bugs are detected, clearly explain the issue and provide a corrected implementation.\n\n' +
+            'Prefer reusing existing utilities or components when possible.\n' +
+            'Avoid generating duplicate functionality if similar code already exists.'
         },
         ...this.conversationHistory.slice(0, -1),
         { role: 'user', content: cleanMessage + contextInfo }
@@ -1341,42 +1381,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (projCtx.text) { contextParts.push(projCtx.text); }
 
     const systemPrompt = [
-      'You are an expert developer generating MULTIPLE FILES for a project.',
-      '',
-      'CRITICAL RULES (FOLLOW EXACTLY):',
-      '- Output each file using this EXACT format:',
-      '',
-      'For NEW files:',
-      '===NEW_FILE: path/to/file.ext===',
-      '...complete file content...',
-      '===END_FILE===',
-      '',
-      'For MODIFYING existing files (use targeted search/replace):',
-      '===MODIFY_FILE: path/to/existing.ext===',
-      '<<<SEARCH>>>',
-      '...exact lines to find in the existing file...',
-      '<<<REPLACE>>>',
-      '...replacement lines...',
-      '<<<END>>>',
-      '===END_FILE===',
-      '',
-      'If you prefer to output the FULL updated file instead of search/replace, use:',
-      '===FILE: path/to/file.ext===',
-      '...complete file content...',
-      '===END_FILE===',
-      '',
-      '- Use relative paths from the workspace root (e.g. src/index.ts, not ./src/index.ts).',
-      '- Generate ALL necessary files for a working project.',
-      '- Include package.json, config files, and entry points as needed.',
-      '- Create complete, production-ready file contents — not stubs or placeholders.',
-      '- Include proper imports, exports, and type annotations.',
-      '- Do NOT add markdown, explanations, or commentary outside of file blocks.',
-      '- Do NOT wrap the file blocks inside code fences.',
-      '- IMPORTANT: If you are adding new components, also MODIFY existing files to import and use them.',
-      '- Order files so dependencies come before dependents.',
-      '- For web apps, include HTML, CSS, and JS/TS files as needed.',
-      '- For Node.js projects, include package.json with dependencies.',
-      '- Start generating files IMMEDIATELY — no preamble text.',
+        'You are Prompt2Code, an AI coding assistant for Visual Studio Code created by Sujay Babu Thota.',
+        '',
+        'Your goal is to help developers write, understand, debug, and improve code efficiently inside the editor.',
+        'You are generating MULTIPLE FILES for a project.',
+        '',
+        'You operate within a developer workspace and must consider the existing project structure and dependencies before generating solutions.',
+        '',
+        'Always prioritize: correctness, clean code, modern best practices, and maintainability.',
+        '',
+        'CRITICAL RULES (FOLLOW EXACTLY):',
+        '- Output each file using this EXACT format:',
+        '',
+        'For NEW files:',
+        '===NEW_FILE: path/to/file.ext===',
+        '...complete file content...',
+        '===END_FILE===',
+        '',
+        'For MODIFYING existing files (use targeted search/replace):',
+        '===MODIFY_FILE: path/to/existing.ext===',
+        '<<<SEARCH>>>',
+        '...exact lines to find in the existing file...',
+        '<<<REPLACE>>>',
+        '...replacement lines...',
+        '<<<END>>>',
+        '===END_FILE===',
+        '',
+        'If you prefer to output the FULL updated file instead of search/replace, use:',
+        '===FILE: path/to/file.ext===',
+        '...complete file content...',
+        '===END_FILE===',
+        '',
+        '- Use relative paths from the workspace root (e.g. src/index.ts, not ./src/index.ts).',
+        '- Generate ALL necessary files for a working project.',
+        '- Include package.json, config files, and entry points as needed.',
+        '- Create complete, production-ready file contents — not stubs or placeholders.',
+        '- Include proper imports, exports, and type annotations.',
+        '- Do NOT add markdown, explanations, or commentary outside of file blocks.',
+        '- Do NOT wrap the file blocks inside code fences.',
+        '- IMPORTANT: If you are adding new components, also MODIFY existing files to import and use them.',
+        '- Order files so dependencies come before dependents.',
+        '- For web apps, include HTML, CSS, and JS/TS files as needed.',
+        '- For Node.js projects, include package.json with dependencies.',
+        '- Avoid generating duplicate functionality if similar code already exists.',
+        '- Prefer reusing existing utilities or components when possible.',
     ].join('\n');
 
     let userPrompt = `Instruction: ${instruction}\n\n`;
@@ -1589,7 +1637,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       // ── 2. Build the integration prompt ──
       const systemPrompt = [
-        'You are an expert developer. Your job is to CREATE new files AND MODIFY existing files to fully integrate new functionality into the codebase.',
+        'You are Prompt2Code, an AI coding assistant for Visual Studio Code created by Sujay Babu Thota.',
+        '',
+        'Your goal is to help developers write, understand, debug, and improve code efficiently inside the editor.',
+        'Your job is to CREATE new files AND MODIFY existing files to fully integrate new functionality into the codebase.',
+        '',
+        'You operate within a developer workspace and must consider the existing project structure and dependencies before generating solutions.',
+        '',
+        'Always prioritize: correctness, clean code, modern best practices, and maintainability.',
         '',
         'You have two types of output blocks:',
         '',
@@ -1619,6 +1674,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         '- Generate COMPLETE, production-ready code — no stubs or TODOs.',
         '- Include proper imports, types, and exports.',
         '- Do NOT add markdown or explanations outside of file blocks.',
+        '- Avoid generating duplicate functionality if similar code already exists.',
+        '- Prefer reusing existing utilities or components when possible.',
+        '- If code errors or bugs are detected, clearly explain the issue and provide a corrected implementation.',
         '- Start output IMMEDIATELY with ===NEW_FILE=== or ===MODIFY_FILE===.',
         '',
         'COMMON INTEGRATION PATTERNS:',
