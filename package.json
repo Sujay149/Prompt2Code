@@ -1,9 +1,9 @@
 {
-  "icon": "Prompt2Code1.png",
+  "icon": "images/Prompt2Code1.png",
   "name": "prompt2code",
   "displayName": "Prompt2Code",
   "description": "Prompt2Code is an AI-powered coding assistant for Visual Studio Code that generates code, detects bugs, explains functions, and helps developers build applications faster.",
-  "version": "1.4.7",
+  "version": "1.4.8",
   "publisher": "SujayBabuThota",
   "repository": {
     "type": "git",
@@ -32,7 +32,7 @@
         {
           "id": "prompt2code-chat",
           "title": "Prompt2Code",
-          "icon": "Prompt2Code2.png"
+          "icon": "images/Prompt2Code2.png"
         }
       ]
     },
