@@ -1148,13 +1148,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const fileName = path.basename(editor.document.uri.fsPath);
         const diffSummary = this.computeDiffSummary(checkpointContent, updatedContent, fileName);
 
+        const codeEditSummary = `✅ Code updated in editor.\n\n${diffSummary}`;
+        this.conversationHistory.push({ role: 'assistant', content: codeEditSummary });
+
         this._view?.webview.postMessage({
           type: 'assistantMessage',
-          message: `✅ Code updated in editor.\n\n${diffSummary}`
+          message: codeEditSummary
         });
 
         // Show Keep / Undo checkpoint banner
         this._view?.webview.postMessage({ type: 'checkpoint', id: cpId });
+        this.notifyResolvedModel();
 
         return;
       }
@@ -1331,9 +1335,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.replaceFullDocument(editor, code, 5);
 
     vscode.window.showInformationMessage(`Created ${relPath}`);
+    const createSummary = `✅ Created and opened **${relPath}** in the editor.`;
+    this.conversationHistory.push({ role: 'assistant', content: createSummary });
+
     this._view?.webview.postMessage({
       type: 'assistantMessage',
-      message: `✅ Created and opened **${relPath}** in the editor.`
+      message: createSummary
     });
 
     // Show Keep / Undo checkpoint banner
@@ -3772,7 +3779,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   };
 
   if (newChat) newChat.onclick = () => {
-    completeActiveSession();
+    // Complete the current session with elapsed time, then start fresh
+    if (_sessionStartTs > 0) {
+      const elapsed = Math.round((Date.now() - _sessionStartTs) / 1000);
+      completeActiveSession(elapsed + 's');
+      _sessionStartTs = 0;
+    } else {
+      completeActiveSession();
+    }
     activeSessionId = null;
     vscode.postMessage({ type: 'newChat' });
   };
@@ -3911,14 +3925,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (msg.type === 'userMessage') add('You', msg.message, 'user');
     if (msg.type === 'assistantMessage') {
       add('AI', msg.message, 'assistant');
-      // Mark session complete with elapsed time
-      if (_sessionStartTs > 0) {
-        const elapsed = Math.round((Date.now() - _sessionStartTs) / 1000);
-        completeActiveSession(elapsed + 's');
-        _sessionStartTs = 0;
-      } else {
-        completeActiveSession();
-      }
+      // Keep session active — don't mark completed after every response.
+      // Session is only completed when the user starts a new chat.
     }
     if (msg.type === 'linkCheckpoint') {
       const userMsgs = chat.querySelectorAll('.msg.user');
