@@ -430,51 +430,68 @@ export class GroqClient {
 
     let lastError: Error | null = null;
 
-    for (const modelId of modelsToTry) {
-      try {
-        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
-        console.log(`🤖 Auto mode: trying ${modelLabel} (${modelId})`);
+    this._inAutoFallback = true;
+    try {
+      for (const modelId of modelsToTry) {
+        try {
+          const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
+          console.log(`🤖 Auto mode: trying ${modelLabel} (${modelId})`);
 
-        const result = await this._requestCompletionForModel(messages, options, modelId);
-        this._lastResolvedModel = modelId;
-        console.log(`✅ Auto mode: success with ${modelLabel}`);
-        return result;
-      } catch (err: any) {
-        lastError = err;
-        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
-        const status = err?.response?.status;
-        const isRetriable = this.isRetriableForFallback(err);
+          const result = await this._requestCompletionForModel(messages, options, modelId);
+          this._lastResolvedModel = modelId;
+          console.log(`✅ Auto mode: success with ${modelLabel}`);
+          return result;
+        } catch (err: any) {
+          lastError = err;
+          const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
+          const isRetriable = this.isRetriableForFallback(err);
 
-        console.warn(`⚠️ Auto mode: ${modelLabel} failed (${status || err.message}). Retriable: ${isRetriable}`);
+          console.warn(`⚠️ Auto mode: ${modelLabel} failed (${err.message}). Retriable: ${isRetriable}`);
 
-        // Only fallback on retriable errors (rate limit, server error, model overloaded, etc.)
-        // Auth errors (401/403) for a specific model are retriable because another model may work
-        if (!isRetriable) {
-          throw err; // Non-retriable error (e.g. user cancellation) — don't try more models
+          if (!isRetriable) {
+            throw err; // Non-retriable error (e.g. user cancellation) — don't try more models
+          }
+          // Continue to next model
         }
-        // Continue to next model
       }
-    }
 
-    // All models failed
-    throw lastError ?? new Error('All models in Auto fallback chain failed.');
+      // All models failed — show a helpful message
+      const configuredCount = modelsToTry.length;
+      vscode.window.showErrorMessage(
+        `Auto mode: all ${configuredCount} configured models failed. Check your API keys in Configure Tools (⚙️).`
+      );
+      throw lastError ?? new Error('All models in Auto fallback chain failed.');
+    } finally {
+      this._inAutoFallback = false;
+    }
   }
 
   /** Determine if an error should trigger a fallback to the next model. */
   private isRetriableForFallback(err: any): boolean {
     if (!err) { return false; }
+
+    // Check Axios-style response status (direct Axios errors)
     const status = err?.response?.status;
-    // Rate limit, server errors, overloaded, bad gateway, timeout, auth issues on specific models
-    if (status && [401, 402, 403, 429, 500, 502, 503, 504].includes(status)) { return true; }
-    // Network errors
+    if (status && [401, 402, 403, 404, 429, 500, 502, 503, 504].includes(status)) { return true; }
+
+    // Network-level errors
     const code = err?.code;
-    if (['ENOTFOUND', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED'].includes(code)) { return true; }
-    // Empty response
-    if (err.message?.includes('empty response')) { return true; }
-    // Model not found
-    if (status === 404) { return true; }
+    if (['ENOTFOUND', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED'].includes(code ?? '')) { return true; }
+
+    // Provider methods re-throw as plain Error with status in the message.
+    // Parse the message for known retriable patterns.
+    const msg: string = err?.message ?? '';
+    if (/\(40[1-3]\)|\(404\)|\(429\)|\(50[0-4]\)/i.test(msg)) { return true; }
+    if (/rate limit|too many requests/i.test(msg)) { return true; }
+    if (/invalid.*key|expired.*key|key.*invalid|key.*expired|authentication failed/i.test(msg)) { return true; }
+    if (/empty response|not found|access denied|insufficient credits|Missing API key/i.test(msg)) { return true; }
+    if (/network|timeout|ECONNRESET|ETIMEDOUT/i.test(msg)) { return true; }
+
     return false;
   }
+
+  /** Whether we are currently inside an auto-fallback loop (suppress UI popups). */
+  private _inAutoFallback = false;
 
   /** Core completion logic for a specific model (or the current active model). */
   private async _requestCompletionForModel(
@@ -488,9 +505,11 @@ export class GroqClient {
 
     if (!config.apiKey) {
       const providerName: Record<string,string> = { groq: 'Groq', openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Google Gemini' };
-      vscode.window.showErrorMessage(
-        `${providerName[config.provider] ?? config.provider} API key not set for model ${config.model}.`
-      );
+      if (!this._inAutoFallback) {
+        vscode.window.showErrorMessage(
+          `${providerName[config.provider] ?? config.provider} API key not set for model ${config.model}.`
+        );
+      }
       throw new Error(`Missing API key for ${config.provider}`);
     }
 
@@ -611,7 +630,9 @@ export class GroqClient {
         return { content, finishReason: choice?.finish_reason };
       } catch (error: any) {
         if (!axios.isAxiosError(error)) {
-          vscode.window.showErrorMessage('Unexpected error communicating with Groq.');
+          if (!this._inAutoFallback) {
+            vscode.window.showErrorMessage('Unexpected error communicating with Groq.');
+          }
           throw error;
         }
         const status = error.response?.status;
@@ -628,9 +649,11 @@ export class GroqClient {
           await this.sleep(backoffMs);
           continue;
         }
-        vscode.window.showErrorMessage(
-          status ? `Groq API error (${status}): ${apiMessage}` : `Groq network error${code ? ` (${code})` : ''}: ${apiMessage}`
-        );
+        if (!this._inAutoFallback) {
+          vscode.window.showErrorMessage(
+            status ? `Groq API error (${status}): ${apiMessage}` : `Groq network error${code ? ` (${code})` : ''}: ${apiMessage}`
+          );
+        }
         throw error;
       }
     }
@@ -1098,25 +1121,30 @@ export class GroqClient {
     const modelsToTry = [primaryModel, ...fallbacks];
     let lastError: Error | null = null;
 
-    for (const modelId of modelsToTry) {
-      try {
-        console.log(`🤖 Auto section-edit: trying ${modelId}`);
-        const savedOverride = this._modelOverride;
-        this._modelOverride = modelId;
+    this._inAutoFallback = true;
+    try {
+      for (const modelId of modelsToTry) {
         try {
-          const result = await this._generateSectionEditCore(instruction, language, selectedCode, surroundingContext, onChunk, extraContext);
-          this._lastResolvedModel = modelId;
-          return result;
-        } finally {
-          this._modelOverride = savedOverride;
+          console.log(`🤖 Auto section-edit: trying ${modelId}`);
+          const savedOverride = this._modelOverride;
+          this._modelOverride = modelId;
+          try {
+            const result = await this._generateSectionEditCore(instruction, language, selectedCode, surroundingContext, onChunk, extraContext);
+            this._lastResolvedModel = modelId;
+            return result;
+          } finally {
+            this._modelOverride = savedOverride;
+          }
+        } catch (err: any) {
+          lastError = err;
+          if (!this.isRetriableForFallback(err)) { throw err; }
+          console.warn(`⚠️ Auto section-edit: ${modelId} failed, trying next...`);
         }
-      } catch (err: any) {
-        lastError = err;
-        if (!this.isRetriableForFallback(err)) { throw err; }
-        console.warn(`⚠️ Auto section-edit: ${modelId} failed, trying next...`);
       }
+      throw lastError ?? new Error('All models failed in Auto section-edit fallback.');
+    } finally {
+      this._inAutoFallback = false;
     }
-    throw lastError ?? new Error('All models failed in Auto section-edit fallback.');
   }
 
   /** Core section edit logic. */
@@ -1131,7 +1159,9 @@ export class GroqClient {
     const config = this.getConfig();
 
     if (!config.apiKey) {
-      vscode.window.showErrorMessage(`API key not set for model ${config.model}.`);
+      if (!this._inAutoFallback) {
+        vscode.window.showErrorMessage(`API key not set for model ${config.model}.`);
+      }
       throw new Error('Missing API key');
     }
 
@@ -1303,28 +1333,33 @@ export class GroqClient {
     const modelsToTry = [primaryModel, ...fallbacks];
     let lastError: Error | null = null;
 
-    for (const modelId of modelsToTry) {
-      try {
-        const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
-        console.log(`🤖 Auto stream: trying ${modelLabel}`);
-
-        // Temporarily set override to this model
-        const savedOverride = this._modelOverride;
-        this._modelOverride = modelId;
+    this._inAutoFallback = true;
+    try {
+      for (const modelId of modelsToTry) {
         try {
-          const result = await this._generateCodeStreamingCore(instruction, language, onChunk, context, currentFileContent);
-          this._lastResolvedModel = modelId;
-          return result;
-        } finally {
-          this._modelOverride = savedOverride;
+          const modelLabel = GroqClient.AVAILABLE_MODELS.find(m => m.id === modelId)?.label ?? modelId;
+          console.log(`🤖 Auto stream: trying ${modelLabel}`);
+
+          // Temporarily set override to this model
+          const savedOverride = this._modelOverride;
+          this._modelOverride = modelId;
+          try {
+            const result = await this._generateCodeStreamingCore(instruction, language, onChunk, context, currentFileContent);
+            this._lastResolvedModel = modelId;
+            return result;
+          } finally {
+            this._modelOverride = savedOverride;
+          }
+        } catch (err: any) {
+          lastError = err;
+          if (!this.isRetriableForFallback(err)) { throw err; }
+          console.warn(`⚠️ Auto stream: ${modelId} failed, trying next...`);
         }
-      } catch (err: any) {
-        lastError = err;
-        if (!this.isRetriableForFallback(err)) { throw err; }
-        console.warn(`⚠️ Auto stream: ${modelId} failed, trying next...`);
       }
+      throw lastError ?? new Error('All models failed in Auto streaming fallback.');
+    } finally {
+      this._inAutoFallback = false;
     }
-    throw lastError ?? new Error('All models failed in Auto streaming fallback.');
   }
 
   /** Core streaming code generation logic. */
@@ -1338,7 +1373,9 @@ export class GroqClient {
     const config = this.getConfig();
 
     if (!config.apiKey) {
-      vscode.window.showErrorMessage(`API key not set for model ${config.model}.`);
+      if (!this._inAutoFallback) {
+        vscode.window.showErrorMessage(`API key not set for model ${config.model}.`);
+      }
       throw new Error('Missing API key');
     }
 
