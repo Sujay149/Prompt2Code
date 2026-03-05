@@ -2670,6 +2670,138 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   .ai-diff-summary .diff-removed { color: #f48771; font-weight: 600; }
   .ai-diff-summary .diff-size { opacity: 0.7; }
   .ai-plain-text { white-space: pre-wrap; font-size: 13px; line-height: 1.65; font-weight: 400; }
+
+  /* ═══ Copilot-style Markdown Rendering ═══ */
+  .md-content { font-size: 13px; line-height: 1.7; color: var(--vscode-foreground); }
+  .md-content p { margin: 0 0 10px; }
+  .md-content p:last-child { margin-bottom: 0; }
+
+  /* Headings */
+  .md-content h1, .md-content h2, .md-content h3,
+  .md-content h4, .md-content h5, .md-content h6 {
+    margin: 16px 0 8px; font-weight: 600;
+    color: var(--vscode-foreground);
+    line-height: 1.35;
+  }
+  .md-content h1:first-child, .md-content h2:first-child,
+  .md-content h3:first-child { margin-top: 2px; }
+  .md-content h1 { font-size: 18px; padding-bottom: 6px; border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1)); }
+  .md-content h2 { font-size: 15.5px; padding-bottom: 4px; border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.07)); }
+  .md-content h3 { font-size: 14px; }
+  .md-content h4 { font-size: 13px; }
+
+  /* Bold, italic, strikethrough */
+  .md-content strong { font-weight: 700; color: var(--vscode-foreground); }
+  .md-content em { font-style: italic; }
+  .md-content del { text-decoration: line-through; opacity: 0.6; }
+
+  /* Inline code */
+  .md-content code:not(.code-block-code) {
+    font-family: var(--vscode-editor-font-family, 'Cascadia Code', 'Fira Code', 'Consolas', monospace);
+    font-size: 12px; padding: 2px 5px;
+    border-radius: 4px;
+    background: var(--vscode-textCodeBlock-background, rgba(255,255,255,0.06));
+    color: var(--vscode-textPreformat-foreground, #d4d4d4);
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+    word-break: break-word;
+  }
+
+  /* Code blocks */
+  .md-code-block {
+    margin: 10px 0;
+    border-radius: 6px;
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+    overflow: hidden;
+    background: var(--vscode-editor-background, #1e1e1e);
+  }
+  .md-code-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 10px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+  }
+  .md-code-lang {
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; opacity: 0.55;
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+  }
+  .md-code-actions { display: flex; gap: 2px; }
+  .md-code-btn {
+    display: flex; align-items: center; gap: 4px;
+    background: transparent; border: none;
+    color: var(--vscode-foreground); cursor: pointer;
+    padding: 2px 6px; border-radius: 3px;
+    font-size: 11px; opacity: 0.5; transition: all 0.15s;
+    font-family: var(--vscode-font-family);
+  }
+  .md-code-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08)); }
+  .md-code-body {
+    padding: 10px 14px;
+    overflow-x: auto;
+  }
+  .md-code-body code {
+    font-family: var(--vscode-editor-font-family, 'Cascadia Code', 'Fira Code', 'Consolas', monospace);
+    font-size: 12px; line-height: 1.55;
+    color: var(--vscode-editor-foreground, #d4d4d4);
+    white-space: pre; display: block;
+    background: transparent; border: none; padding: 0;
+  }
+
+  /* Lists */
+  .md-content ul, .md-content ol {
+    margin: 6px 0 10px; padding-left: 22px;
+  }
+  .md-content li {
+    margin: 3px 0; line-height: 1.65;
+    padding-left: 2px;
+  }
+  .md-content li::marker {
+    color: var(--vscode-foreground); opacity: 0.45;
+  }
+  .md-content ul { list-style-type: disc; }
+  .md-content ul ul { list-style-type: circle; margin: 2px 0; }
+  .md-content ul ul ul { list-style-type: square; }
+  .md-content ol { list-style-type: decimal; }
+  .md-content li > p { margin: 0; }
+
+  /* Blockquote */
+  .md-content blockquote {
+    margin: 8px 0; padding: 6px 14px;
+    border-left: 3px solid var(--vscode-textBlockQuote-border, rgba(255,255,255,0.15));
+    background: var(--vscode-textBlockQuote-background, rgba(255,255,255,0.03));
+    border-radius: 0 4px 4px 0;
+    color: var(--vscode-foreground); opacity: 0.85;
+  }
+  .md-content blockquote p { margin: 0; }
+
+  /* Horizontal rule */
+  .md-content hr {
+    border: none; border-top: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    margin: 14px 0;
+  }
+
+  /* Links */
+  .md-content a {
+    color: var(--vscode-textLink-foreground, #3794ff);
+    text-decoration: none;
+  }
+  .md-content a:hover { text-decoration: underline; }
+
+  /* Tables */
+  .md-content table {
+    border-collapse: collapse; margin: 8px 0; width: 100%;
+    font-size: 12px;
+  }
+  .md-content th, .md-content td {
+    padding: 5px 10px; text-align: left;
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+  }
+  .md-content th {
+    font-weight: 600;
+    background: rgba(255,255,255,0.04);
+  }
+
   .msg-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
   .msg-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.2s ease; }
   .msg:hover .msg-actions { opacity: 1; }
@@ -4145,6 +4277,179 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     chat.scrollTop = chat.scrollHeight;
   }
 
+  /** Lightweight inline markdown → HTML renderer (no external library needed) */
+  function renderMarkdown(raw) {
+    if (!raw) return '';
+    // Normalize line endings
+    let src = raw.replace(/\\r\\n/g, '\\n');
+
+    // ── Phase 1: extract fenced code blocks to protect them ──
+    const codeBlocks = [];
+    src = src.replace(/^(\`\`\`)(\\w*)?\\n([\\s\\S]*?)^\\1\\s*$/gm, function(_m, _fence, lang, body) {
+      const idx = codeBlocks.length;
+      codeBlocks.push({ lang: (lang || '').trim(), body: body.replace(/\\n$/, '') });
+      return '%%CODEBLOCK_' + idx + '%%';
+    });
+
+    // ── Phase 2: process blocks (lines → paragraphs, headings, lists, blockquotes, hr, tables) ──
+    const lines = src.split('\\n');
+    let html = '';
+    let i = 0;
+
+    function inlineFormat(text) {
+      let s = escapeHtml(text);
+      // images
+      s = s.replace(/!\\[([^\\]]*)\\]\\(([^)]+)\\)/g, '<img alt="$1" src="$2" style="max-width:100%">');
+      // links
+      s = s.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" title="$2">$1</a>');
+      // bold + italic
+      s = s.replace(/\\*\\*\\*(.+?)\\*\\*\\*/g, '<strong><em>$1</em></strong>');
+      // bold
+      s = s.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+      s = s.replace(/__(.+?)__/g, '<strong>$1</strong>');
+      // italic
+      s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+      s = s.replace(/_(.+?)_/g, '<em>$1</em>');
+      // strikethrough
+      s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+      // inline code (must come after escapeHtml)
+      s = s.replace(/\`([^\`]+?)\`/g, '<code>$1</code>');
+      return s;
+    }
+
+    function parseList(startIdx) {
+      let out = '';
+      let idx = startIdx;
+      const firstLine = lines[idx];
+      const isOrdered = /^\\s*\\d+[.)\\s]/.test(firstLine);
+      const tag = isOrdered ? 'ol' : 'ul';
+      const baseIndent = firstLine.match(/^(\\s*)/)[1].length;
+      out += '<' + tag + '>';
+      while (idx < lines.length) {
+        const l = lines[idx];
+        const indent = l.match(/^(\\s*)/)[1].length;
+        if (indent < baseIndent && l.trim() !== '') break;
+        if (l.trim() === '' && idx > startIdx) {
+          // blank line inside list is ok; peek ahead
+          if (idx + 1 < lines.length && /^\\s*[-*+]\\s|^\\s*\\d+[.)\\s]/.test(lines[idx + 1])) { idx++; continue; }
+          break;
+        }
+        if (indent > baseIndent && /^\\s*[-*+]\\s|^\\s*\\d+[.)\\s]/.test(l)) {
+          // Nested list
+          const nested = parseList(idx);
+          out += nested.html;
+          idx = nested.endIdx;
+          continue;
+        }
+        const bullet = l.match(/^\\s*(?:[-*+]|\\d+[.)\\s])\\s*(.*)/);
+        if (bullet) {
+          out += '<li>' + inlineFormat(bullet[1]) + '</li>';
+        } else if (indent >= baseIndent) {
+          // continuation line
+          out += inlineFormat(l.trim());
+        } else {
+          break;
+        }
+        idx++;
+      }
+      out += '</' + tag + '>';
+      return { html: out, endIdx: idx };
+    }
+
+    while (i < lines.length) {
+      const line = lines[i];
+      const trimmed = line.trim();
+
+      // Code block placeholder
+      if (/^%%CODEBLOCK_\\d+%%$/.test(trimmed)) {
+        const cbIdx = parseInt(trimmed.match(/\\d+/)[0]);
+        const cb = codeBlocks[cbIdx];
+        html += '<div class="md-code-block"><div class="md-code-header"><span class="md-code-lang">' + escapeHtml(cb.lang || 'code') + '</span>'
+          + '<div class="md-code-actions"><button class="md-code-btn" onclick="navigator.clipboard.writeText(this.closest(\\'.md-code-block\\').querySelector(\\'code\\').textContent).then(()=>{this.textContent=\\'✓ Copied\\';setTimeout(()=>{this.textContent=\\'Copy\\'},1200)})">Copy</button></div>'
+          + '</div><div class="md-code-body"><code class="code-block-code">' + escapeHtml(cb.body) + '</code></div></div>';
+        i++; continue;
+      }
+
+      // Blank line
+      if (trimmed === '') { i++; continue; }
+
+      // Horizontal rule
+      if (/^[-*_]{3,}\\s*$/.test(trimmed) && !/^[-*+]\\s/.test(trimmed)) { html += '<hr>'; i++; continue; }
+
+      // Heading
+      const headingMatch = trimmed.match(/^(#{1,6})\\s+(.+)/);
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        html += '<h' + level + '>' + inlineFormat(headingMatch[2]) + '</h' + level + '>';
+        i++; continue;
+      }
+
+      // Blockquote
+      if (/^>\\s?/.test(trimmed)) {
+        let bq = '';
+        while (i < lines.length && /^>/.test(lines[i].trim())) {
+          bq += lines[i].trim().replace(/^>\\s?/, '') + '\\n';
+          i++;
+        }
+        html += '<blockquote>' + renderMarkdown(bq) + '</blockquote>';
+        continue;
+      }
+
+      // Unordered list
+      if (/^\\s*[-*+]\\s/.test(line)) {
+        const res = parseList(i);
+        html += res.html;
+        i = res.endIdx;
+        continue;
+      }
+
+      // Ordered list
+      if (/^\\s*\\d+[.)\\s]/.test(line)) {
+        const res = parseList(i);
+        html += res.html;
+        i = res.endIdx;
+        continue;
+      }
+
+      // Table (simple — | col | col |)
+      if (/^\\|(.+)\\|\\s*$/.test(trimmed) && i + 1 < lines.length && /^\\|[-:\\s|]+\\|\\s*$/.test(lines[i + 1].trim())) {
+        let table = '<table>';
+        // header row
+        const hCells = trimmed.split('|').filter(c => c.trim() !== '');
+        table += '<thead><tr>';
+        for (const c of hCells) table += '<th>' + inlineFormat(c.trim()) + '</th>';
+        table += '</tr></thead>';
+        i += 2; // skip header + separator
+        table += '<tbody>';
+        while (i < lines.length && /^\\|(.+)\\|\\s*$/.test(lines[i].trim())) {
+          const cells = lines[i].trim().split('|').filter(c => c.trim() !== '');
+          table += '<tr>';
+          for (const c of cells) table += '<td>' + inlineFormat(c.trim()) + '</td>';
+          table += '</tr>';
+          i++;
+        }
+        table += '</tbody></table>';
+        html += table;
+        continue;
+      }
+
+      // Paragraph: collect consecutive non-blank, non-special lines
+      let para = '';
+      while (i < lines.length) {
+        const cl = lines[i]; const ct = cl.trim();
+        if (ct === '' || /^#{1,6}\\s/.test(ct) || /^[-*_]{3,}\\s*$/.test(ct) || /^>\\s?/.test(ct)
+            || /^\\s*[-*+]\\s/.test(cl) || /^\\s*\\d+[.)\\s]/.test(cl) || /^%%CODEBLOCK_\\d+%%$/.test(ct)
+            || (/^\\|/.test(ct) && /\\|\\s*$/.test(ct))) break;
+        if (para) para += ' ';
+        para += ct;
+        i++;
+      }
+      if (para) html += '<p>' + inlineFormat(para) + '</p>';
+    }
+
+    return html;
+  }
+
   /** Convert AI plain-text summary into rich HTML with proper styling */
   function formatAssistantMessage(text) {
     // Detect file-summary messages (created/modified/failed pattern)
@@ -4157,8 +4462,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const isStatusMsg = /^(⏳|🔍|🖼️|⌛|🚀)/.test(text.trim());
 
     if (!hasFileSummary && !hasDiff && !isStatusMsg) {
-      // Regular text message — preserve whitespace, escape HTML
-      return '<div class="ai-plain-text">' + escapeHtml(text) + '</div>';
+      // Regular text message — render markdown with Copilot-style formatting
+      return '<div class="md-content">' + renderMarkdown(text) + '</div>';
     }
 
     if (isStatusMsg && !hasFileSummary && !hasDiff) {
@@ -4315,8 +4620,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     header.appendChild(label);
 
     const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.textContent = text;
+    bubble.className = 'bubble md-content';
+    bubble.innerHTML = renderMarkdown(text);
 
     const actions = document.createElement('div');
     actions.className = 'plan-actions';
